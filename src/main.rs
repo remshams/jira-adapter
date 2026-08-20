@@ -1,4 +1,5 @@
 mod config;
+mod jira;
 
 use clap::{Parser, Subcommand};
 
@@ -16,6 +17,8 @@ enum Command {
         #[command(subcommand)]
         command: IssueCommand,
     },
+    /// Print the account the configured credentials belong to
+    Whoami,
 }
 
 #[derive(Subcommand)]
@@ -36,15 +39,42 @@ fn main() {
     match cli.command {
         Command::Issue { command } => match command {
             IssueCommand::Read { issue } => {
-                // Validate the environment early so mistyped commands fail
-                // with a config error instead of later, deeper in the flow.
-                if let Err(err) = config::Config::load() {
-                    eprintln!("error: {err}");
-                    std::process::exit(2);
-                }
                 eprintln!("error: 'issue read {issue}' is not implemented yet");
                 std::process::exit(1);
             }
         },
+        Command::Whoami => whoami(),
     }
+}
+
+fn whoami() -> ! {
+    let config = load_config();
+    let client = match jira::client::JiraClient::new(&config) {
+        Ok(client) => client,
+        Err(err) => exit(3, err),
+    };
+    match client.myself() {
+        Ok(account) => {
+            println!(
+                "{} <{}> ({})",
+                account.display_name.as_deref().unwrap_or("<unknown>"),
+                account.email_address.as_deref().unwrap_or("<no email shown>"),
+                account.account_id
+            );
+            std::process::exit(0);
+        }
+        Err(err) => exit(3, err),
+    }
+}
+
+fn load_config() -> config::Config {
+    match config::Config::load() {
+        Ok(config) => config,
+        Err(err) => exit(2, err),
+    }
+}
+
+fn exit(code: i32, err: impl std::fmt::Display) -> ! {
+    eprintln!("error: {err}");
+    std::process::exit(code);
 }

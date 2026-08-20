@@ -9,11 +9,7 @@ pub const API_TOKEN_VAR: &str = "JIRA_API_TOKEN";
 
 /// Everything jcli needs to authenticate against a Jira Cloud instance:
 /// the instance base URL plus an email and API token for Basic auth.
-///
-/// Fields are read by the Jira client once it exists; until then the
-/// validation logic is exercised by the tests below.
 #[derive(Debug)]
-#[cfg_attr(not(test), expect(dead_code))]
 pub struct Config {
     pub base_url: Url,
     pub email: String,
