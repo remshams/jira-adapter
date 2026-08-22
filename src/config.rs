@@ -70,7 +70,7 @@ fn normalize_base_url(raw: &str) -> Result<Url, ConfigError> {
             return Err(ConfigError::InvalidBaseUrl {
                 name: BASE_URL_VAR,
                 value: raw.to_string(),
-            })
+            });
         }
     }
     if !url.path().ends_with('/') {
@@ -146,7 +146,10 @@ mod tests {
         ];
         assert!(matches!(
             Config::from_vars(vars(&all)).unwrap_err(),
-            ConfigError::InvalidBaseUrl { name: BASE_URL_VAR, .. }
+            ConfigError::InvalidBaseUrl {
+                name: BASE_URL_VAR,
+                ..
+            }
         ));
     }
 
