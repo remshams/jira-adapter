@@ -58,7 +58,10 @@ fn whoami() -> ! {
             println!(
                 "{} <{}> ({})",
                 account.display_name.as_deref().unwrap_or("<unknown>"),
-                account.email_address.as_deref().unwrap_or("<no email shown>"),
+                account
+                    .email_address
+                    .as_deref()
+                    .unwrap_or("<no email shown>"),
                 account.account_id
             );
             std::process::exit(0);
