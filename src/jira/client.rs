@@ -1,7 +1,7 @@
-use reqwest::blocking::Client;
 use reqwest::StatusCode;
-use serde::de::DeserializeOwned;
+use reqwest::blocking::Client;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 use url::Url;
 
