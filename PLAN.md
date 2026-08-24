@@ -4,7 +4,7 @@
 
 New tool, built from scratch in an empty repo (`/home/remshams/coding/jira-adapter`). Goal: a small CLI that reads Jira Cloud issues so AI agents (primary consumer) can pull ticket content into their context, and later download ticket attachments (zips, screenshots, videos). Read-only by design for now; write operations are an explicit future extension, so the HTTP layer is built GET-only from day one.
 
-Steps 0 through 3 are complete. The current CLI loads configuration, authenticates with Jira Cloud, and provides a `whoami` smoke test. Step 4 adds issue-key validation before issue retrieval is implemented.
+Steps 0 through 4 are complete. The current CLI loads configuration, authenticates with Jira Cloud, provides a `whoami` smoke test, and validates exact issue keys. Step 5 adds issue retrieval.
 
 Primary consumers are agents, which drives the output design: predictable markdown on stdout, no colors or spinners, errors as one clear line on stderr with non-zero exit.
 
@@ -47,7 +47,7 @@ Small sequential steps, one component per commit (commit scope in PascalCase, e.
 - [x] 1. cargo init (`--bin --name jcli`), add clap (derive), `jcli issue read <issue>` subcommand that parses args and exits 1 with "not implemented" — commit scope `chore(IssueRead)`
 - [x] 2. `config.rs`: dotenvy `.env` loading, read/validate `JIRA_BASE_URL` | `JIRA_EMAIL` | `JIRA_API_TOKEN`, clear error naming the missing var, unit tests — commit scope `feat(Config)`
 - [x] 3. `jira/client.rs`: blocking reqwest GET client with Basic auth, typed errors (thiserror), `/rest/api/3/myself` smoke method, httpmock tests for auth header and status mapping — commit scope `feat(JiraClient)`
-- [ ] 4. `issue_key.rs`: accept exact canonical keys such as `ABC-123`, reject URLs and malformed values with a useful error, unit tests — commit scope `feat(IssueKey)`
+- [x] 4. `issue_key.rs`: accept exact canonical keys such as `ABC-123`, reject URLs and malformed values with a useful error, unit tests — commit scope `feat(IssueKey)`
 - [ ] 5. `jira/issue.rs` + client method: GET `/rest/api/3/issue/{key}` while requesting only summary, status, assignee, reporter, labels, and description; serde models and an httpmock test with a canned issue response — commit scope `feat(IssueRead)`
 - [ ] 6. `adf/markdown.rs`: recursive ADF-to-Markdown renderer (headings, paragraphs, bold/italic/code/links, bullet/ordered lists, code blocks, blockquotes), preserve known child content under unknown nodes, unit tests per node type, wire into `issue read` output — commit scope `feat(AdfRenderer)`
 - [ ] 7. Attachments (`jcli issue attachments <key>`, download all into `./<issue-key>/`, `--out` override, no overwrite) — deferred, planned only after 1-6 land and are reviewed
