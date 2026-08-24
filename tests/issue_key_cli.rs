@@ -1,0 +1,36 @@
+use std::process::{Command, Output};
+
+fn issue_read(value: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_jcli"))
+        .args(["issue", "read", value])
+        .current_dir(std::env::temp_dir())
+        .output()
+        .expect("jcli should start")
+}
+
+#[test]
+fn invalid_key_reports_the_parse_error_without_echoing_input() {
+    let input = "https://example.atlassian.net/browse/AB-1";
+    let output = issue_read(input);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr,
+        "error: invalid Jira issue key: expected PROJECT-NUMBER\n"
+    );
+    assert!(!stderr.contains(input));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn valid_key_reaches_the_not_implemented_branch() {
+    let output = issue_read("ABC-123");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "error: 'issue read ABC-123' is not implemented yet\n"
+    );
+    assert!(output.stdout.is_empty());
+}

@@ -1,4 +1,5 @@
 mod config;
+mod issue_key;
 mod jira;
 
 use clap::{Parser, Subcommand};
@@ -25,7 +26,7 @@ enum Command {
 enum IssueCommand {
     /// Print an issue's content as markdown
     Read {
-        /// Issue key (e.g. ABC-123) or browse URL
+        /// Canonical issue key (e.g. ABC-123)
         issue: String,
     },
 }
@@ -39,7 +40,14 @@ fn main() {
     match cli.command {
         Command::Issue { command } => match command {
             IssueCommand::Read { issue } => {
-                eprintln!("error: 'issue read {issue}' is not implemented yet");
+                let issue = match issue.parse::<issue_key::IssueKey>() {
+                    Ok(issue) => issue,
+                    Err(err) => exit(1, err),
+                };
+                eprintln!(
+                    "error: 'issue read {}' is not implemented yet",
+                    issue.as_str()
+                );
                 std::process::exit(1);
             }
         },
