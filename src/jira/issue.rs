@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "step 6 will consume these issue and ADF models in CLI output"
-)]
-
 use serde::Deserialize;
 
 /// A Jira Cloud account, as returned by `/rest/api/3/myself` and embedded in
@@ -39,7 +34,15 @@ pub struct Status {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AdfDocument {
+    #[allow(
+        dead_code,
+        reason = "Jira's ADF version is validated by serde but not rendered"
+    )]
     pub version: u32,
+    #[allow(
+        dead_code,
+        reason = "Jira's ADF root type is parsed but only its content is rendered"
+    )]
     #[serde(rename = "type")]
     pub node_type: String,
     #[serde(default)]

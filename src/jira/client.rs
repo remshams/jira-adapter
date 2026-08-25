@@ -55,10 +55,6 @@ impl JiraClient {
         self.get_json("rest/api/3/myself")
     }
 
-    #[allow(
-        dead_code,
-        reason = "step 6 will call this method from the issue read command"
-    )]
     pub fn issue(&self, issue_key: &IssueKey) -> Result<Issue, JiraClientError> {
         let path = format!("rest/api/3/issue/{}", issue_key.as_str());
         let mut url = self.base_url.join(&path)?;

@@ -1,6 +1,9 @@
+mod adf;
 mod config;
 mod issue_key;
 mod jira;
+
+use std::io::{self, Write};
 
 use clap::{Parser, Subcommand};
 
@@ -32,9 +35,6 @@ enum IssueCommand {
 }
 
 fn main() {
-    // Load .env when present; real environment variables take precedence.
-    let _ = dotenvy::dotenv();
-
     let cli = Cli::parse();
 
     match cli.command {
@@ -44,15 +44,28 @@ fn main() {
                     Ok(issue) => issue,
                     Err(err) => exit(1, err),
                 };
-                eprintln!(
-                    "error: 'issue read {}' is not implemented yet",
-                    issue.as_str()
-                );
-                std::process::exit(1);
+                read_issue(&issue);
             }
         },
         Command::Whoami => whoami(),
     }
+}
+
+fn read_issue(issue_key: &issue_key::IssueKey) -> ! {
+    let config = load_config();
+    let client = match jira::client::JiraClient::new(&config) {
+        Ok(client) => client,
+        Err(err) => exit(3, err),
+    };
+    let issue = match client.issue(issue_key) {
+        Ok(issue) => issue,
+        Err(err) => exit(3, err),
+    };
+    let output = adf::render_issue(&issue);
+    if let Err(err) = io::stdout().write_all(output.as_bytes()) {
+        exit(3, err);
+    }
+    std::process::exit(0);
 }
 
 fn whoami() -> ! {
@@ -79,6 +92,9 @@ fn whoami() -> ! {
 }
 
 fn load_config() -> config::Config {
+    // Load .env only after command arguments that guard configuration access
+    // have been validated. Real environment variables still take precedence.
+    let _ = dotenvy::dotenv();
     match config::Config::load() {
         Ok(config) => config,
         Err(err) => exit(2, err),
