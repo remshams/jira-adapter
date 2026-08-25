@@ -72,7 +72,8 @@ fn jira_error_exits_three_without_stdout() {
             .query_param("fields", FIELDS)
             .query_param_count(r".*", r".*", 1)
             .header("Authorization", AUTH_HEADER);
-        then.status(500).body("Jira failed");
+        then.status(500)
+            .body("Jira\r\nfailed\u{1b}[31m cli@example.com cli-test-token\u{202e}");
     });
 
     let output = run(&server);
@@ -82,6 +83,6 @@ fn jira_error_exits_three_without_stdout() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "error: Jira API error (HTTP 500): Jira failed\n"
+        "error: Jira API error (HTTP 500): Jira failed[31m [redacted] [redacted]\n"
     );
 }
