@@ -86,7 +86,11 @@ impl JiraClient {
             return Ok(response.json()?);
         }
 
-        let body = truncate(&response.text().unwrap_or_default(), 500);
+        let body = sanitize_api_error_body(
+            &response.text().unwrap_or_default(),
+            &self.email,
+            &self.api_token,
+        );
         Err(match status {
             StatusCode::UNAUTHORIZED => JiraClientError::Unauthorized,
             StatusCode::FORBIDDEN => JiraClientError::Forbidden,
@@ -98,6 +102,44 @@ impl JiraClient {
             },
         })
     }
+}
+
+fn sanitize_api_error_body(text: &str, email: &str, api_token: &str) -> String {
+    let mut sanitized = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                sanitized.push(' ');
+            }
+            '\n' | '\t' => sanitized.push(' '),
+            character if is_unsafe_terminal_control(character) => {}
+            character => sanitized.push(character),
+        }
+    }
+
+    let mut redacted = sanitized;
+    for secret in [api_token, email] {
+        if !secret.is_empty() {
+            redacted = redacted.replace(secret, "[redacted]");
+        }
+    }
+    truncate(redacted.trim(), 500)
+}
+
+fn is_unsafe_terminal_control(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
 }
 
 fn truncate(text: &str, max_chars: usize) -> String {
@@ -285,6 +327,18 @@ mod tests {
             }
             other => panic!("expected Api, got: {other}"),
         }
+    }
+
+    #[test]
+    fn sanitizes_and_redacts_api_error_bodies() {
+        let body = sanitize_api_error_body(
+            "first line\r\nsecond\t\u{1b}[31m jane@example.com secret-token\u{202e}",
+            "jane@example.com",
+            "secret-token",
+        );
+
+        assert_eq!(body, "first line second [31m [redacted] [redacted]");
+        assert!(!body.chars().any(is_unsafe_terminal_control));
     }
 
     #[test]
