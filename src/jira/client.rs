@@ -1,23 +1,14 @@
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 use url::Url;
 
 use crate::config::Config;
+use crate::issue_key::IssueKey;
+use crate::jira::issue::{Account, Issue};
 
 const USER_AGENT: &str = concat!("jcli/", env!("CARGO_PKG_VERSION"));
-
-/// A Jira Cloud account, as returned by `/rest/api/3/myself` and embedded in
-/// issue fields such as assignee and reporter.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Account {
-    pub account_id: String,
-    pub display_name: Option<String>,
-    pub email_address: Option<String>,
-}
 
 #[derive(Debug, Error)]
 pub enum JiraClientError {
@@ -64,8 +55,30 @@ impl JiraClient {
         self.get_json("rest/api/3/myself")
     }
 
+    #[allow(
+        dead_code,
+        reason = "step 6 will call this method from the issue read command"
+    )]
+    pub fn issue(&self, issue_key: &IssueKey) -> Result<Issue, JiraClientError> {
+        let path = format!("rest/api/3/issue/{}", issue_key.as_str());
+        let mut url = self.base_url.join(&path)?;
+        url.query_pairs_mut().append_pair(
+            "fields",
+            "summary,status,assignee,reporter,labels,description",
+        );
+        self.get_json_url(url, &path)
+    }
+
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, JiraClientError> {
         let url = self.base_url.join(path)?;
+        self.get_json_url(url, path)
+    }
+
+    fn get_json_url<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        error_path: &str,
+    ) -> Result<T, JiraClientError> {
         let response = self
             .http
             .get(url)
@@ -81,7 +94,7 @@ impl JiraClient {
         Err(match status {
             StatusCode::UNAUTHORIZED => JiraClientError::Unauthorized,
             StatusCode::FORBIDDEN => JiraClientError::Forbidden,
-            StatusCode::NOT_FOUND => JiraClientError::NotFound(path.to_string()),
+            StatusCode::NOT_FOUND => JiraClientError::NotFound(error_path.to_string()),
             StatusCode::TOO_MANY_REQUESTS => JiraClientError::RateLimited,
             other => JiraClientError::Api {
                 status: other.as_u16(),
@@ -138,6 +151,60 @@ mod tests {
         assert_eq!(account.account_id, "5b10a2844c20165700ede21g");
         assert_eq!(account.display_name.as_deref(), Some("Jane Doe"));
         assert_eq!(account.email_address.as_deref(), Some("jane@example.com"));
+    }
+
+    #[test]
+    fn issue_requests_selected_fields_and_parses_adf() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/issue/ABC-123")
+                .query_param(
+                    "fields",
+                    "summary,status,assignee,reporter,labels,description",
+                )
+                .query_param_count(r".*", r".*", 1)
+                .header("Authorization", AUTH_HEADER);
+            then.status(200).json_body(serde_json::json!({
+                "key": "ABC-123",
+                "fields": {
+                    "summary": "Fix the thing",
+                    "status": {"name": "In Progress"},
+                    "assignee": null,
+                    "reporter": {
+                        "accountId": "reporter-id",
+                        "displayName": "Reporter",
+                        "emailAddress": null
+                    },
+                    "labels": ["backend", "urgent"],
+                    "description": {
+                        "version": 1,
+                        "type": "doc",
+                        "content": [{
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": "Description"}]
+                        }]
+                    }
+                }
+            }));
+        });
+
+        let issue = client(&server).issue(&"ABC-123".parse().unwrap()).unwrap();
+
+        mock.assert();
+        assert_eq!(issue.key, "ABC-123");
+        assert_eq!(issue.fields.summary, "Fix the thing");
+        assert_eq!(issue.fields.status.name, "In Progress");
+        assert!(issue.fields.assignee.is_none());
+        assert_eq!(issue.fields.reporter.as_ref().unwrap().email_address, None);
+        assert_eq!(issue.fields.labels, ["backend", "urgent"]);
+        let description = issue.fields.description.unwrap();
+        assert_eq!(description.node_type, "doc");
+        assert_eq!(description.content[0].node_type, "paragraph");
+        assert_eq!(
+            description.content[0].content[0].text.as_deref(),
+            Some("Description")
+        );
     }
 
     #[test]
