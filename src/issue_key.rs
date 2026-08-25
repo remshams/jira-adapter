@@ -21,6 +21,10 @@ impl FromStr for IssueKey {
     type Err = IssueKeyParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        // Jira issue keys use the ASCII form PROJECT-NUMBER. PROJECT is 2-10
+        // uppercase letters or digits and starts with a letter. NUMBER is a
+        // positive integer without leading zeroes. Bytes make those ASCII-only
+        // length and character checks explicit without allocating.
         let bytes = value.as_bytes();
         let separator = bytes
             .iter()
