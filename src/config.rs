@@ -22,8 +22,8 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("environment variable {0} is set but empty")]
     Empty(&'static str),
-    #[error("invalid URL in {name}: '{value}' is not a valid URL starting with http(s)://")]
-    InvalidBaseUrl { name: &'static str, value: String },
+    #[error("invalid URL in {0}: expected an http(s) URL without embedded credentials")]
+    InvalidBaseUrl(&'static str),
 }
 
 impl Config {
@@ -60,18 +60,13 @@ fn required(
 /// path appends to the path instead of replacing its last segment:
 /// `https://x/browse` + `rest/...` would otherwise lose `/browse`.
 fn normalize_base_url(raw: &str) -> Result<Url, ConfigError> {
-    let mut url = Url::parse(raw).map_err(|_| ConfigError::InvalidBaseUrl {
-        name: BASE_URL_VAR,
-        value: raw.to_string(),
-    })?;
-    match url.scheme() {
-        "http" | "https" => {}
-        _ => {
-            return Err(ConfigError::InvalidBaseUrl {
-                name: BASE_URL_VAR,
-                value: raw.to_string(),
-            });
-        }
+    let mut url = Url::parse(raw).map_err(|_| ConfigError::InvalidBaseUrl(BASE_URL_VAR))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.has_host()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(ConfigError::InvalidBaseUrl(BASE_URL_VAR));
     }
     if !url.path().ends_with('/') {
         url.set_path(&format!("{}/", url.path()));
@@ -144,13 +139,10 @@ mod tests {
             (EMAIL_VAR, "jane@example.com"),
             (API_TOKEN_VAR, "token"),
         ];
-        assert!(matches!(
+        assert_eq!(
             Config::from_vars(vars(&all)).unwrap_err(),
-            ConfigError::InvalidBaseUrl {
-                name: BASE_URL_VAR,
-                ..
-            }
-        ));
+            ConfigError::InvalidBaseUrl(BASE_URL_VAR)
+        );
     }
 
     #[test]
@@ -160,9 +152,27 @@ mod tests {
             (EMAIL_VAR, "jane@example.com"),
             (API_TOKEN_VAR, "token"),
         ];
-        assert!(matches!(
+        assert_eq!(
             Config::from_vars(vars(&all)).unwrap_err(),
-            ConfigError::InvalidBaseUrl { .. }
-        ));
+            ConfigError::InvalidBaseUrl(BASE_URL_VAR)
+        );
+    }
+
+    #[test]
+    fn rejects_base_url_credentials_without_echoing_them() {
+        let secret = "embedded-secret";
+        let all = [
+            (
+                BASE_URL_VAR,
+                "https://jira-user:embedded-secret@example.com/jira",
+            ),
+            (EMAIL_VAR, "jane@example.com"),
+            (API_TOKEN_VAR, "token"),
+        ];
+
+        let error = Config::from_vars(vars(&all)).unwrap_err();
+
+        assert_eq!(error, ConfigError::InvalidBaseUrl(BASE_URL_VAR));
+        assert!(!error.to_string().contains(secret));
     }
 }
