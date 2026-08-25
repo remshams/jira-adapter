@@ -33,7 +33,7 @@ fn valid_key_reaches_configuration_loading() {
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "error: invalid URL in JIRA_BASE_URL: 'not a URL' is not a valid URL starting with http(s)://\n"
+        "error: invalid URL in JIRA_BASE_URL: expected an http(s) URL without embedded credentials\n"
     );
     assert!(output.stdout.is_empty());
 }
