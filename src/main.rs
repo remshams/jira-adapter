@@ -76,15 +76,10 @@ fn whoami() -> ! {
     };
     match client.myself() {
         Ok(account) => {
-            println!(
-                "{} <{}> ({})",
-                account.display_name.as_deref().unwrap_or("<unknown>"),
-                account
-                    .email_address
-                    .as_deref()
-                    .unwrap_or("<no email shown>"),
-                account.account_id
-            );
+            let display_name = terminal_field(account.display_name.as_deref(), "<unknown>");
+            let email = terminal_field(account.email_address.as_deref(), "<no email shown>");
+            let account_id = terminal_field(Some(&account.account_id), "<unknown account>");
+            println!("{display_name} <{email}> ({account_id})");
             std::process::exit(0);
         }
         Err(err) => exit(3, err),
@@ -101,7 +96,59 @@ fn load_config() -> config::Config {
     }
 }
 
+fn terminal_field(value: Option<&str>, fallback: &str) -> String {
+    let Some(value) = value else {
+        return fallback.to_string();
+    };
+
+    let mut sanitized = String::with_capacity(value.len());
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                sanitized.push(' ');
+            }
+            '\n' | '\t' => sanitized.push(' '),
+            character
+                if character.is_control()
+                    || matches!(
+                        character,
+                        '\u{061c}'
+                            | '\u{200e}'
+                            | '\u{200f}'
+                            | '\u{202a}'..='\u{202e}'
+                            | '\u{2066}'..='\u{2069}'
+                    ) => {}
+            character => sanitized.push(character),
+        }
+    }
+
+    if sanitized.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        sanitized
+    }
+}
+
 fn exit(code: i32, err: impl std::fmt::Display) -> ! {
     eprintln!("error: {err}");
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_field;
+
+    #[test]
+    fn terminal_fields_are_single_line_and_control_free() {
+        assert_eq!(
+            terminal_field(Some("Jane\r\nDoe\t\u{1b}[31m\u{202e}"), "fallback"),
+            "Jane Doe [31m"
+        );
+        assert_eq!(terminal_field(Some("\u{1b}\u{7}"), "fallback"), "fallback");
+        assert_eq!(terminal_field(None, "fallback"), "fallback");
+    }
 }
