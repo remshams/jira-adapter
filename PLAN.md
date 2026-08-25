@@ -4,7 +4,7 @@
 
 New tool, built from scratch in an empty repo (`/home/remshams/coding/jira-adapter`). Goal: a small CLI that reads Jira Cloud issues so AI agents (primary consumer) can pull ticket content into their context, and later download ticket attachments (zips, screenshots, videos). Read-only by design for now; write operations are an explicit future extension, so the HTTP layer is built GET-only from day one.
 
-Steps 0 through 5 are complete. The current data layer authenticates with Jira Cloud, validates exact issue keys, and retrieves typed issue responses with a minimal field selection. Step 6 adds ADF rendering and wires issue retrieval into CLI output.
+Steps 0 through 6 are complete. The current CLI authenticates with Jira Cloud, validates exact issue keys, retrieves a minimal set of issue fields, and renders stable Markdown for agents. Attachment support remains deferred to step 7.
 
 Primary consumers are agents, which drives the output design: predictable markdown on stdout, no colors or spinners, errors as one clear line on stderr with non-zero exit.
 
@@ -49,7 +49,7 @@ Small sequential steps, one component per commit (commit scope in PascalCase, e.
 - [x] 3. `jira/client.rs`: blocking reqwest GET client with Basic auth, typed errors (thiserror), `/rest/api/3/myself` smoke method, httpmock tests for auth header and status mapping — commit scope `feat(JiraClient)`
 - [x] 4. `issue_key.rs`: accept exact canonical keys such as `ABC-123`, reject URLs and malformed values with a useful error, unit tests — commit scope `feat(IssueKey)`
 - [x] 5. `jira/issue.rs` + client method: GET `/rest/api/3/issue/{key}` while requesting only summary, status, assignee, reporter, labels, and description; serde models and an httpmock test with a canned issue response — commit scope `feat(IssueRead)`
-- [ ] 6. `adf/markdown.rs`: recursive ADF-to-Markdown renderer (headings, paragraphs, bold/italic/code/links, bullet/ordered lists, code blocks, blockquotes), preserve known child content under unknown nodes, unit tests per node type, wire into `issue read` output — commit scope `feat(AdfRenderer)`
+- [x] 6. `adf/markdown.rs`: recursive ADF-to-Markdown renderer (headings, paragraphs, bold/italic/code/links, bullet/ordered lists, code blocks, blockquotes), preserve known child content under unknown nodes, unit tests per node type, wire into `issue read` output — commit scope `feat(AdfRenderer)`
 - [ ] 7. Attachments (`jcli issue attachments <key>`, download all into `./<issue-key>/`, `--out` override, no overwrite) — deferred, planned only after 1-6 land and are reviewed
 
 ## Verification
