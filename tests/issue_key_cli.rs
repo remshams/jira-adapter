@@ -4,6 +4,9 @@ fn issue_read(value: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_jcli"))
         .args(["issue", "read", value])
         .current_dir(std::env::temp_dir())
+        .env("JIRA_BASE_URL", "not a URL")
+        .env("JIRA_EMAIL", "unused@example.com")
+        .env("JIRA_API_TOKEN", "unused-token")
         .output()
         .expect("jcli should start")
 }
@@ -24,13 +27,13 @@ fn invalid_key_reports_the_parse_error_without_echoing_input() {
 }
 
 #[test]
-fn valid_key_reaches_the_not_implemented_branch() {
+fn valid_key_reaches_configuration_loading() {
     let output = issue_read("ABC-123");
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "error: 'issue read ABC-123' is not implemented yet\n"
+        "error: invalid URL in JIRA_BASE_URL: 'not a URL' is not a valid URL starting with http(s)://\n"
     );
     assert!(output.stdout.is_empty());
 }
