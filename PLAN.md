@@ -24,7 +24,7 @@ Primary consumers are agents, which drives the output design: predictable markdo
 | Errors | thiserror in client/parser modules and explicit exit handling at the application boundary |
 | Tests | Inline unit tests for parsers and renderer; httpmock server tests for the HTTP client (auth header, status mapping, field parsing) |
 | Comments | Deferred (fixes earlier over-scope: no comment pagination work) |
-| Attachments | `jcli issue attachments <key>` downloads all attachments on Unix into `./<issue-key>/`, with `--out` as a direct directory override, ID-prefixed safe filenames, no overwrite, bounded streaming, staged publication, and exact size verification. |
+| Attachments | `jcli issue attachments <key>` downloads all attachments on Unix into `./<issue-key>/`, with `--out` as a direct directory override. Each attachment streams into a private temporary file, passes exact-size verification, and then atomically overwrites its final ID-prefixed filename. If a later attachment fails, earlier replacements remain. The user owns and controls the output directory. |
 
 ## Approach
 
@@ -38,7 +38,7 @@ Small sequential steps, one component per commit (commit scope in PascalCase, e.
 - `src/jira/issue.rs` (issue models: fields, ADF document struct)
 - `src/issue_key.rs` (exact issue-key parsing)
 - `src/adf/markdown.rs` (ADF-to-Markdown renderer)
-- `src/attachments.rs` (safe attachment planning, streaming, staging, and publication)
+- `src/attachments.rs` (safe attachment planning, streaming, and per-file atomic replacement)
 - `src/jira/attachment.rs` (minimal attachment metadata models)
 - Inline unit and httpmock-based client tests
 - `PLAN.md` (this file)
@@ -52,7 +52,7 @@ Small sequential steps, one component per commit (commit scope in PascalCase, e.
 - [x] 4. `issue_key.rs`: accept exact canonical keys such as `ABC-123`, reject URLs and malformed values with a useful error, unit tests — commit scope `feat(IssueKey)`
 - [x] 5. `jira/issue.rs` + client method: GET `/rest/api/3/issue/{key}` while requesting only summary, status, assignee, reporter, labels, and description; serde models and an httpmock test with a canned issue response — commit scope `feat(IssueRead)`
 - [x] 6. `adf/markdown.rs`: recursive ADF-to-Markdown renderer (headings, paragraphs, bold/italic/code/links, bullet/ordered lists, code blocks, blockquotes), preserve known child content under unknown nodes, unit tests per node type, wire into `issue read` output — commit scope `feat(AdfRenderer)`
-- [x] 7. Attachments (`jcli issue attachments <key>`, Unix-only download into `./<issue-key>/`, direct `--out` override, no overwrite, safe ID-prefixed names, bounded metadata and content, staged no-clobber publication, cleanup and process tests) — commit scope `feat(Attachments)`
+- [x] 7. Attachments (`jcli issue attachments <key>`, Unix-only download into `./<issue-key>/`, direct `--out` override, safe ID-prefixed names, bounded metadata and content, per-file temporary downloads, exact-size verification, atomic overwrite, cleanup and process tests) — commit scopes `feat(Attachments)` and `refactor(Attachments)`
 
 ## Verification
 
