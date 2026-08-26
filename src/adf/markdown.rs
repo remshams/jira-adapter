@@ -20,6 +20,7 @@ pub fn render_issue(issue: &Issue) -> String {
     } else {
         labels.join(", ")
     };
+    let attachment_count = issue.fields.attachment.len();
     let description = issue
         .fields
         .description
@@ -30,7 +31,7 @@ pub fn render_issue(issue: &Issue) -> String {
         .unwrap_or_else(|| "No description.".to_string());
 
     format!(
-        "# {key}: {summary}\n\n- Status: {status}\n- Assignee: {assignee}\n- Reporter: {reporter}\n- Labels: {labels}\n\n## Description\n\n{}\n",
+        "# {key}: {summary}\n\n- Status: {status}\n- Assignee: {assignee}\n- Reporter: {reporter}\n- Labels: {labels}\n- Attachments: {attachment_count}\n\n## Description\n\n{}\n",
         description.trim_matches('\n')
     )
 }
@@ -618,6 +619,7 @@ mod tests {
                 }),
                 labels: vec!["backend".to_string(), "urgent".to_string()],
                 description,
+                attachment: Vec::new(),
             },
         }
     }
@@ -1032,9 +1034,34 @@ mod tests {
         .unwrap();
         let output = render_issue(&issue);
 
-        assert!(output.contains("- Assignee: Unknown\n- Reporter: Unknown\n- Labels: None\n"));
+        assert!(output.contains(
+            "- Assignee: Unknown\n- Reporter: Unknown\n- Labels: None\n- Attachments: 0\n"
+        ));
         assert!(!output.contains("secret-id"));
         assert!(!output.contains("secret@example.com"));
+    }
+
+    #[test]
+    fn issue_attachment_metadata_renders_only_the_count() {
+        let issue: Issue = serde_json::from_value(json!({
+            "key": "ABC-123",
+            "fields": {
+                "summary": "Summary",
+                "status": {"name": "Open"},
+                "assignee": null,
+                "reporter": null,
+                "labels": [],
+                "description": null,
+                "attachment": [{"id": "private-id", "filename": "private.txt", "size": 1}]
+            }
+        }))
+        .unwrap();
+
+        let output = render_issue(&issue);
+
+        assert!(output.contains("- Attachments: 1\n"));
+        assert!(!output.contains("private-id"));
+        assert!(!output.contains("private.txt"));
     }
 
     #[test]
@@ -1076,7 +1103,9 @@ mod tests {
         .unwrap();
         let output = render_issue(&issue);
 
-        assert!(output.contains("- Assignee: Unknown\n- Reporter: Unknown\n- Labels: kept\n"));
+        assert!(output.contains(
+            "- Assignee: Unknown\n- Reporter: Unknown\n- Labels: kept\n- Attachments: 0\n"
+        ));
     }
 
     #[test]
@@ -1094,7 +1123,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(render_issue(&issue).contains("- Labels: None\n"));
+        assert!(render_issue(&issue).contains("- Labels: None\n- Attachments: 0\n"));
     }
 
     #[test]
@@ -1105,7 +1134,7 @@ mod tests {
 
         assert_eq!(
             render_issue(&issue(Some(description))),
-            "# ABC-123: Fix the thing\n\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Labels: backend, urgent\n\n## Description\n\nRendered description.\n"
+            "# ABC-123: Fix the thing\n\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Labels: backend, urgent\n- Attachments: 0\n\n## Description\n\nRendered description.\n"
         );
     }
 }

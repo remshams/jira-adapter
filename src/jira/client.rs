@@ -1,31 +1,58 @@
+use std::io::{self, Read};
+
 use reqwest::StatusCode;
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, Response};
+use reqwest::redirect::Policy;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 use url::Url;
 
 use crate::config::Config;
 use crate::issue_key::IssueKey;
+use crate::jira::attachment::{Attachment, AttachmentIssue, MAX_ATTACHMENT_ID_BYTES};
 use crate::jira::issue::{Account, Issue};
 
 const USER_AGENT: &str = concat!("jcli/", env!("CARGO_PKG_VERSION"));
+const ISSUE_FIELDS: &str = "summary,status,assignee,reporter,labels,description,attachment";
+pub(crate) const MAX_ATTACHMENT_METADATA_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum JiraClientError {
-    #[error("failed to build request URL: {0}")]
-    InvalidUrl(#[from] url::ParseError),
+    #[error("failed to build request URL")]
+    InvalidUrl,
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("attachment HTTP request failed")]
+    AttachmentHttp {
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Jira metadata response could not be read")]
+    MetadataRead {
+        #[source]
+        source: io::Error,
+    },
+    #[error("Jira metadata response exceeds the safety limit")]
+    MetadataTooLarge,
+    #[error("Jira metadata response is invalid")]
+    MetadataJson {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Jira returned an unsafe attachment ID")]
+    InvalidAttachmentId,
     #[error("authentication failed (401): check JIRA_EMAIL and JIRA_API_TOKEN")]
     Unauthorized,
     #[error("forbidden (403): the account lacks permission for this operation")]
     Forbidden,
     #[error("not found (404): {0}")]
-    NotFound(String),
+    NotFound(&'static str),
     #[error("rate limited by Jira (429): try again later")]
     RateLimited,
-    #[error("Jira API error (HTTP {status}): {body}")]
-    Api { status: u16, body: String },
+    #[error("Jira API error (HTTP {status})")]
+    Api { status: u16 },
+    #[error("attachment download failed (HTTP {status})")]
+    AttachmentStatus { status: u16 },
 }
 
 /// Blocking, GET-only client for the Jira Cloud REST API v3.
@@ -34,6 +61,7 @@ pub enum JiraClientError {
 /// jcli writable later means consciously extending this type.
 pub struct JiraClient {
     http: Client,
+    attachment_http: Client,
     base_url: Url,
     email: String,
     api_token: String,
@@ -42,8 +70,13 @@ pub struct JiraClient {
 impl JiraClient {
     pub fn new(config: &Config) -> Result<Self, JiraClientError> {
         let http = Client::builder().user_agent(USER_AGENT).build()?;
+        let attachment_http = Client::builder()
+            .user_agent(USER_AGENT)
+            .redirect(Policy::none())
+            .build()?;
         Ok(JiraClient {
             http,
+            attachment_http,
             base_url: config.base_url.clone(),
             email: config.email.clone(),
             api_token: config.api_token.clone(),
@@ -52,103 +85,142 @@ impl JiraClient {
 
     /// Who am I? Smoke-tests authentication against `/rest/api/3/myself`.
     pub fn myself(&self) -> Result<Account, JiraClientError> {
-        self.get_json("rest/api/3/myself")
+        let url = self.endpoint_url(&["rest", "api", "3", "myself"])?;
+        self.get_json_url(url, "account")
     }
 
     pub fn issue(&self, issue_key: &IssueKey) -> Result<Issue, JiraClientError> {
-        let path = format!("rest/api/3/issue/{}", issue_key.as_str());
-        let mut url = self.base_url.join(&path)?;
-        url.query_pairs_mut().append_pair(
-            "fields",
-            "summary,status,assignee,reporter,labels,description",
-        );
-        self.get_json_url(url, &path)
+        let mut url = self.endpoint_url(&["rest", "api", "3", "issue", issue_key.as_str()])?;
+        url.query_pairs_mut().append_pair("fields", ISSUE_FIELDS);
+        // The issue response now includes attachment metadata. Bound the
+        // complete response so a large attachment list cannot bypass its
+        // metadata limit through `issue read`.
+        self.get_bounded_metadata_json_url(url, "issue")
     }
 
-    fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, JiraClientError> {
-        let url = self.base_url.join(path)?;
-        self.get_json_url(url, path)
+    pub fn attachments(&self, issue_key: &IssueKey) -> Result<Vec<Attachment>, JiraClientError> {
+        let mut url = self.endpoint_url(&["rest", "api", "3", "issue", issue_key.as_str()])?;
+        url.query_pairs_mut().append_pair("fields", "attachment");
+        let issue: AttachmentIssue = self.get_bounded_metadata_json_url(url, "issue")?;
+        Ok(issue.fields.attachment)
+    }
+
+    /// Returns a checked streaming response for one attachment.
+    ///
+    /// The attachment ID is appended as one encoded path segment. Jira-provided
+    /// resource URLs are never accepted here.
+    pub fn attachment_content(&self, id: &str) -> Result<Response, JiraClientError> {
+        if id.is_empty() || id.len() > MAX_ATTACHMENT_ID_BYTES || matches!(id, "." | "..") {
+            return Err(JiraClientError::InvalidAttachmentId);
+        }
+        let mut url = self.endpoint_url(&["rest", "api", "3", "attachment", "content", id])?;
+        url.query_pairs_mut().append_pair("redirect", "false");
+
+        let response = self
+            .attachment_http
+            .get(url)
+            .basic_auth(&self.email, Some(&self.api_token))
+            .send()
+            .map_err(|source| JiraClientError::AttachmentHttp { source })?;
+        let status = response.status();
+        if status == StatusCode::OK {
+            return Ok(response);
+        }
+
+        Err(match status {
+            StatusCode::UNAUTHORIZED => JiraClientError::Unauthorized,
+            StatusCode::FORBIDDEN => JiraClientError::Forbidden,
+            StatusCode::NOT_FOUND => JiraClientError::NotFound("attachment content"),
+            StatusCode::TOO_MANY_REQUESTS => JiraClientError::RateLimited,
+            other => JiraClientError::AttachmentStatus {
+                status: other.as_u16(),
+            },
+        })
+    }
+
+    fn endpoint_url(&self, segments: &[&str]) -> Result<Url, JiraClientError> {
+        let mut url = self.base_url.clone();
+        url.set_query(None);
+        url.set_fragment(None);
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| JiraClientError::InvalidUrl)?;
+        path.pop_if_empty();
+        for segment in segments {
+            path.push(segment);
+        }
+        drop(path);
+        Ok(url)
     }
 
     fn get_json_url<T: DeserializeOwned>(
         &self,
         url: Url,
-        error_path: &str,
+        error_resource: &'static str,
     ) -> Result<T, JiraClientError> {
-        let response = self
-            .http
-            .get(url)
-            .basic_auth(&self.email, Some(&self.api_token))
-            .send()?;
+        let response = self.authenticated_get(url)?;
+        let response = Self::check_json_response(response, error_resource)?;
+        Ok(response.json()?)
+    }
 
-        let status = response.status();
-        if status.is_success() {
-            return Ok(response.json()?);
+    fn get_bounded_metadata_json_url<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        error_resource: &'static str,
+    ) -> Result<T, JiraClientError> {
+        let response = self.authenticated_get(url)?;
+        let response = Self::check_json_response(response, error_resource)?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_ATTACHMENT_METADATA_BYTES as u64)
+        {
+            return Err(JiraClientError::MetadataTooLarge);
         }
 
-        let body = sanitize_api_error_body(
-            &response.text().unwrap_or_default(),
-            &self.email,
-            &self.api_token,
-        );
+        let body = read_bounded_metadata_body(response)?;
+        serde_json::from_slice(&body).map_err(|source| JiraClientError::MetadataJson { source })
+    }
+
+    fn check_json_response(
+        response: Response,
+        error_resource: &'static str,
+    ) -> Result<Response, JiraClientError> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+
         Err(match status {
             StatusCode::UNAUTHORIZED => JiraClientError::Unauthorized,
             StatusCode::FORBIDDEN => JiraClientError::Forbidden,
-            StatusCode::NOT_FOUND => JiraClientError::NotFound(error_path.to_string()),
+            StatusCode::NOT_FOUND => JiraClientError::NotFound(error_resource),
             StatusCode::TOO_MANY_REQUESTS => JiraClientError::RateLimited,
             other => JiraClientError::Api {
                 status: other.as_u16(),
-                body,
             },
         })
     }
+
+    fn authenticated_get(&self, url: Url) -> Result<Response, JiraClientError> {
+        Ok(self
+            .http
+            .get(url)
+            .basic_auth(&self.email, Some(&self.api_token))
+            .send()?)
+    }
 }
 
-fn sanitize_api_error_body(text: &str, email: &str, api_token: &str) -> String {
-    let mut sanitized = String::with_capacity(text.len());
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
-        match character {
-            '\r' => {
-                if characters.peek() == Some(&'\n') {
-                    characters.next();
-                }
-                sanitized.push(' ');
-            }
-            '\n' | '\t' => sanitized.push(' '),
-            character if is_unsafe_terminal_control(character) => {}
-            character => sanitized.push(character),
-        }
+fn read_bounded_metadata_body(mut reader: impl Read) -> Result<Vec<u8>, JiraClientError> {
+    let mut body = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_ATTACHMENT_METADATA_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|source| JiraClientError::MetadataRead { source })?;
+    if body.len() > MAX_ATTACHMENT_METADATA_BYTES {
+        return Err(JiraClientError::MetadataTooLarge);
     }
-
-    let mut redacted = sanitized;
-    for secret in [api_token, email] {
-        if !secret.is_empty() {
-            redacted = redacted.replace(secret, "[redacted]");
-        }
-    }
-    truncate(redacted.trim(), 500)
-}
-
-fn is_unsafe_terminal_control(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
-}
-
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        text.to_string()
-    } else {
-        let truncated: String = text.chars().take(max_chars).collect();
-        format!("{truncated}...")
-    }
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -192,15 +264,12 @@ mod tests {
     }
 
     #[test]
-    fn issue_requests_selected_fields_and_parses_adf() {
+    fn issue_requests_selected_fields_once_and_parses_attachment_metadata() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method(GET)
                 .path("/rest/api/3/issue/ABC-123")
-                .query_param(
-                    "fields",
-                    "summary,status,assignee,reporter,labels,description",
-                )
+                .query_param("fields", ISSUE_FIELDS)
                 .query_param_count(r".*", r".*", 1)
                 .header("Authorization", AUTH_HEADER);
             then.status(200).json_body(serde_json::json!({
@@ -222,20 +291,28 @@ mod tests {
                             "type": "paragraph",
                             "content": [{"type": "text", "text": "Description"}]
                         }]
-                    }
+                    },
+                    "attachment": [{
+                        "id": "opaque-id",
+                        "filename": "report.pdf",
+                        "size": 42,
+                        "content": "https://ignored.example/content"
+                    }]
                 }
             }));
         });
 
         let issue = client(&server).issue(&"ABC-123".parse().unwrap()).unwrap();
 
-        mock.assert();
+        mock.assert_calls(1);
         assert_eq!(issue.key, "ABC-123");
         assert_eq!(issue.fields.summary, "Fix the thing");
         assert_eq!(issue.fields.status.name, "In Progress");
         assert!(issue.fields.assignee.is_none());
         assert_eq!(issue.fields.reporter.as_ref().unwrap().email_address, None);
         assert_eq!(issue.fields.labels, ["backend", "urgent"]);
+        assert_eq!(issue.fields.attachment.len(), 1);
+        assert_eq!(issue.fields.attachment[0].id, "opaque-id");
         let description = issue.fields.description.unwrap();
         assert_eq!(description.node_type, "doc");
         assert_eq!(description.content[0].node_type, "paragraph");
@@ -246,9 +323,230 @@ mod tests {
     }
 
     #[test]
-    fn appends_the_api_path_to_a_base_url_with_a_path_prefix() {
-        // httpmock itself only listens at the root, so this pins down the
-        // URL building directly rather than through a request.
+    fn attachment_metadata_uses_only_the_attachment_field() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/issue/ABC-123")
+                .query_param("fields", "attachment")
+                .query_param_count(r".*", r".*", 1)
+                .header("Authorization", AUTH_HEADER);
+            then.status(200).json_body(serde_json::json!({
+                "fields": {"attachment": [{
+                    "id": "a/b?c#d",
+                    "filename": "report.pdf",
+                    "size": 4,
+                    "content": "https://ignored.example/content",
+                    "self": "https://ignored.example/self",
+                    "thumbnail": "https://ignored.example/thumbnail"
+                }]}
+            }));
+        });
+
+        let attachments = client(&server)
+            .attachments(&"ABC-123".parse().unwrap())
+            .unwrap();
+
+        mock.assert_calls(1);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].id, "a/b?c#d");
+    }
+
+    #[test]
+    fn attachment_metadata_response_is_bounded_without_truncation() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/rest/api/3/issue/ABC-123");
+            then.status(200)
+                .body(vec![b' '; MAX_ATTACHMENT_METADATA_BYTES + 1]);
+        });
+
+        let error = client(&server)
+            .attachments(&"ABC-123".parse().unwrap())
+            .unwrap_err();
+
+        mock.assert_calls(1);
+        assert!(matches!(error, JiraClientError::MetadataTooLarge));
+    }
+
+    #[test]
+    fn metadata_reader_rejects_an_unannounced_oversized_body_without_truncation() {
+        let error = read_bounded_metadata_body(std::io::Cursor::new(vec![
+            b' ';
+            MAX_ATTACHMENT_METADATA_BYTES
+                + 1
+        ]))
+        .unwrap_err();
+
+        assert!(matches!(error, JiraClientError::MetadataTooLarge));
+    }
+
+    #[test]
+    fn issue_response_with_attachment_metadata_is_bounded() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/rest/api/3/issue/ABC-123");
+            then.status(200)
+                .body(vec![b' '; MAX_ATTACHMENT_METADATA_BYTES + 1]);
+        });
+
+        let error = client(&server)
+            .issue(&"ABC-123".parse().unwrap())
+            .unwrap_err();
+
+        mock.assert_calls(1);
+        assert!(matches!(error, JiraClientError::MetadataTooLarge));
+    }
+
+    #[test]
+    fn attachment_content_encodes_the_id_as_one_segment_and_has_one_query() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/attachment/content/a%2Fb%3Fc%23d")
+                .query_param("redirect", "false")
+                .query_param_count(r".*", r".*", 1)
+                .header("Authorization", AUTH_HEADER)
+                .header_missing("Range");
+            then.status(200).body("data");
+        });
+
+        let response = client(&server).attachment_content("a/b?c#d").unwrap();
+
+        mock.assert_calls(1);
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn dot_attachment_ids_are_rejected_before_a_request() {
+        let server = MockServer::start();
+        let any_request = server.mock(|when, then| {
+            when.method(GET);
+            then.status(200);
+        });
+        let client = client(&server);
+
+        for id in [".", ".."] {
+            let error = client.attachment_content(id).unwrap_err();
+            assert!(matches!(error, JiraClientError::InvalidAttachmentId));
+            assert!(!error.to_string().contains(id));
+        }
+        let oversized_id = "a".repeat(MAX_ATTACHMENT_ID_BYTES + 1);
+        assert!(matches!(
+            client.attachment_content(&oversized_id).unwrap_err(),
+            JiraClientError::InvalidAttachmentId
+        ));
+        any_request.assert_calls(0);
+    }
+
+    #[test]
+    fn attachment_content_rejects_partial_content_without_a_range_request() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/attachment/content/id")
+                .query_param("redirect", "false");
+            then.status(206).body("partial");
+        });
+
+        let error = client(&server).attachment_content("id").unwrap_err();
+
+        mock.assert_calls(1);
+        assert!(matches!(
+            error,
+            JiraClientError::AttachmentStatus { status: 206 }
+        ));
+    }
+
+    #[test]
+    fn json_endpoints_follow_redirects() {
+        let server = MockServer::start();
+        let myself_redirect = server.mock(|when, then| {
+            when.method(GET).path("/rest/api/3/myself");
+            then.status(302).header("Location", "/redirected-myself");
+        });
+        let myself_target = server.mock(|when, then| {
+            when.method(GET).path("/redirected-myself");
+            then.status(200).json_body(serde_json::json!({
+                "accountId": "account-id",
+                "displayName": "Jane"
+            }));
+        });
+        let issue_redirect = server.mock(|when, then| {
+            when.method(GET).path("/rest/api/3/issue/ABC-123");
+            then.status(302).header("Location", "/redirected-issue");
+        });
+        let issue_target = server.mock(|when, then| {
+            when.method(GET).path("/redirected-issue");
+            then.status(200).json_body(serde_json::json!({
+                "key": "ABC-123",
+                "fields": {
+                    "summary": "Summary",
+                    "status": {"name": "Open"},
+                    "assignee": null,
+                    "reporter": null,
+                    "labels": [],
+                    "description": null,
+                    "attachment": []
+                }
+            }));
+        });
+        let metadata_redirect = server.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/issue/XYZ-789")
+                .query_param("fields", "attachment");
+            then.status(302).header("Location", "/redirected-metadata");
+        });
+        let metadata_target = server.mock(|when, then| {
+            when.method(GET).path("/redirected-metadata");
+            then.status(200)
+                .json_body(serde_json::json!({"fields": {"attachment": []}}));
+        });
+        let client = client(&server);
+
+        client.myself().unwrap();
+        client.issue(&"ABC-123".parse().unwrap()).unwrap();
+        client.attachments(&"XYZ-789".parse().unwrap()).unwrap();
+
+        for mock in [
+            myself_redirect,
+            myself_target,
+            issue_redirect,
+            issue_target,
+            metadata_redirect,
+            metadata_target,
+        ] {
+            mock.assert_calls(1);
+        }
+    }
+
+    #[test]
+    fn content_redirects_are_not_followed_and_do_not_forward_auth() {
+        let server = MockServer::start();
+        let redirect = server.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/attachment/content/id")
+                .query_param("redirect", "false")
+                .header("Authorization", AUTH_HEADER);
+            then.status(302).header("Location", "/untrusted-target");
+        });
+        let target = server.mock(|when, then| {
+            when.method(GET).path("/untrusted-target");
+            then.status(200).body("should not be read");
+        });
+
+        let error = client(&server).attachment_content("id").unwrap_err();
+
+        redirect.assert_calls(1);
+        target.assert_calls(0);
+        assert!(matches!(
+            error,
+            JiraClientError::AttachmentStatus { status: 302 }
+        ));
+    }
+
+    #[test]
+    fn appends_api_segments_to_a_base_url_with_a_path_prefix() {
         let mut config = Config {
             base_url: Url::parse("https://example.com/jira").unwrap(),
             email: "jane@example.com".to_string(),
@@ -256,7 +554,27 @@ mod tests {
         };
         config.base_url.set_path("/jira/");
         let client = JiraClient::new(&config).unwrap();
-        let url = client.base_url.join("rest/api/3/myself").unwrap();
+        let url = client
+            .endpoint_url(&["rest", "api", "3", "attachment", "content", "a/b"])
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://example.com/jira/rest/api/3/attachment/content/a%2Fb"
+        );
+    }
+
+    #[test]
+    fn endpoint_builder_discards_base_query_and_fragment() {
+        let config = Config {
+            base_url: Url::parse("https://example.com/jira/?unsafe=1#fragment").unwrap(),
+            email: "jane@example.com".to_string(),
+            api_token: "token".to_string(),
+        };
+        let client = JiraClient::new(&config).unwrap();
+        let url = client
+            .endpoint_url(&["rest", "api", "3", "myself"])
+            .unwrap();
+
         assert_eq!(url.as_str(), "https://example.com/jira/rest/api/3/myself");
     }
 
@@ -285,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_404_to_not_found_with_the_request_path() {
+    fn maps_404_to_not_found_with_a_safe_resource_name() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(GET);
@@ -294,7 +612,7 @@ mod tests {
 
         let err = client(&server).myself().unwrap_err();
         match err {
-            JiraClientError::NotFound(path) => assert_eq!(path, "rest/api/3/myself"),
+            JiraClientError::NotFound(resource) => assert_eq!(resource, "account"),
             other => panic!("expected NotFound, got: {other}"),
         }
     }
@@ -312,42 +630,35 @@ mod tests {
     }
 
     #[test]
-    fn maps_500_to_an_api_error_with_status_and_body() {
+    fn maps_500_to_a_status_only_api_error() {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(GET);
-            then.status(500).body("boom");
+            then.status(500)
+                .body("secret-token\n\u{1b}[31m untrusted response data");
         });
 
-        let err = client(&server).myself().unwrap_err();
-        match err {
-            JiraClientError::Api { status, body } => {
-                assert_eq!(status, 500);
-                assert_eq!(body, "boom");
-            }
-            other => panic!("expected Api, got: {other}"),
-        }
+        let error = client(&server).myself().unwrap_err();
+
+        assert!(matches!(error, JiraClientError::Api { status: 500 }));
+        assert_eq!(error.to_string(), "Jira API error (HTTP 500)");
     }
 
     #[test]
-    fn sanitizes_and_redacts_api_error_bodies() {
-        let body = sanitize_api_error_body(
-            "first line\r\nsecond\t\u{1b}[31m jane@example.com secret-token\u{202e}",
-            "jane@example.com",
-            "secret-token",
-        );
+    fn attachment_status_errors_do_not_echo_response_data() {
+        let server = MockServer::start();
+        let secret_body = "https://content.example/private\n\u{1b}[31mraw metadata";
+        server.mock(|when, then| {
+            when.method(GET);
+            then.status(500).body(secret_body);
+        });
 
-        assert_eq!(body, "first line second [31m [redacted] [redacted]");
-        assert!(!body.chars().any(is_unsafe_terminal_control));
-    }
+        let error = client(&server).attachment_content("unsafe/id").unwrap_err();
+        let rendered = error.to_string();
 
-    #[test]
-    fn truncate_leaves_short_text_untouched() {
-        assert_eq!(truncate("hello", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_cuts_long_text_by_chars_not_bytes() {
-        assert_eq!(truncate("ääääää", 3), "äää...");
+        assert_eq!(rendered, "attachment download failed (HTTP 500)");
+        assert!(!rendered.contains("content.example"));
+        assert!(!rendered.contains("unsafe/id"));
+        assert!(!rendered.contains('\u{1b}'));
     }
 }

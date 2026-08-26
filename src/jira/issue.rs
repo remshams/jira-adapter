@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+use crate::jira::attachment::Attachment;
+
 /// A Jira Cloud account, as returned by `/rest/api/3/myself` and embedded in
 /// issue fields such as assignee and reporter.
 #[derive(Debug, Clone, Deserialize)]
@@ -25,6 +27,8 @@ pub struct IssueFields {
     #[serde(default)]
     pub labels: Vec<String>,
     pub description: Option<AdfDocument>,
+    #[serde(default)]
+    pub attachment: Vec<Attachment>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,7 +86,8 @@ mod tests {
                 "assignee": null,
                 "reporter": null,
                 "labels": [],
-                "description": null
+                "description": null,
+                "attachment": []
             }
         }))
         .unwrap();

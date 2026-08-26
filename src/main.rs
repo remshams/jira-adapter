@@ -1,9 +1,11 @@
 mod adf;
+mod attachments;
 mod config;
 mod issue_key;
 mod jira;
 
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -32,6 +34,14 @@ enum IssueCommand {
         /// Canonical issue key (e.g. ABC-123)
         issue: String,
     },
+    /// Download all attachments for an issue (Unix only)
+    Attachments {
+        /// Canonical issue key (e.g. ABC-123)
+        issue: String,
+        /// Destination directory; defaults to ./<issue-key>/
+        #[arg(long, value_name = "DIRECTORY")]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -40,14 +50,23 @@ fn main() {
     match cli.command {
         Command::Issue { command } => match command {
             IssueCommand::Read { issue } => {
-                let issue = match issue.parse::<issue_key::IssueKey>() {
-                    Ok(issue) => issue,
-                    Err(err) => exit(1, err),
-                };
+                let issue = parse_issue_key(&issue);
                 read_issue(&issue);
+            }
+            IssueCommand::Attachments { issue, out } => {
+                let issue = parse_issue_key(&issue);
+                let output_directory = out.unwrap_or_else(|| PathBuf::from(issue.as_str()));
+                download_attachments(&issue, &output_directory);
             }
         },
         Command::Whoami => whoami(),
+    }
+}
+
+fn parse_issue_key(value: &str) -> issue_key::IssueKey {
+    match value.parse() {
+        Ok(issue) => issue,
+        Err(error) => exit(1, error),
     }
 }
 
@@ -55,34 +74,53 @@ fn read_issue(issue_key: &issue_key::IssueKey) -> ! {
     let config = load_config();
     let client = match jira::client::JiraClient::new(&config) {
         Ok(client) => client,
-        Err(err) => exit(3, err),
+        Err(error) => exit(3, error),
     };
     let issue = match client.issue(issue_key) {
         Ok(issue) => issue,
-        Err(err) => exit(3, err),
+        Err(error) => exit(3, error),
     };
-    let output = adf::render_issue(&issue);
-    if let Err(err) = io::stdout().write_all(output.as_bytes()) {
-        exit(3, err);
+    write_stdout(&adf::render_issue(&issue));
+}
+
+fn download_attachments(issue_key: &issue_key::IssueKey, output_directory: &Path) -> ! {
+    if !cfg!(unix) {
+        exit(4, attachments::AttachmentError::UnsupportedPlatform);
     }
-    std::process::exit(0);
+
+    let config = load_config();
+    let client = match jira::client::JiraClient::new(&config) {
+        Ok(client) => client,
+        Err(error) => exit(3, error),
+    };
+    let metadata = match client.attachments(issue_key) {
+        Ok(metadata) => metadata,
+        Err(error) => exit(3, error),
+    };
+    let manifest = match attachments::download_all(&client, &metadata, output_directory) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let code = if error.is_filesystem() { 4 } else { 3 };
+            exit(code, error);
+        }
+    };
+    write_stdout(&manifest.stdout(issue_key));
 }
 
 fn whoami() -> ! {
     let config = load_config();
     let client = match jira::client::JiraClient::new(&config) {
         Ok(client) => client,
-        Err(err) => exit(3, err),
+        Err(error) => exit(3, error),
     };
     match client.myself() {
         Ok(account) => {
             let display_name = terminal_field(account.display_name.as_deref(), "<unknown>");
             let email = terminal_field(account.email_address.as_deref(), "<no email shown>");
             let account_id = terminal_field(Some(&account.account_id), "<unknown account>");
-            println!("{display_name} <{email}> ({account_id})");
-            std::process::exit(0);
+            write_stdout(&format!("{display_name} <{email}> ({account_id})\n"));
         }
-        Err(err) => exit(3, err),
+        Err(error) => exit(3, error),
     }
 }
 
@@ -92,8 +130,15 @@ fn load_config() -> config::Config {
     let _ = dotenvy::dotenv();
     match config::Config::load() {
         Ok(config) => config,
-        Err(err) => exit(2, err),
+        Err(error) => exit(2, error),
     }
+}
+
+fn write_stdout(output: &str) -> ! {
+    if let Err(error) = io::stdout().write_all(output.as_bytes()) {
+        exit(4, error);
+    }
+    std::process::exit(0);
 }
 
 fn terminal_field(value: Option<&str>, fallback: &str) -> String {
@@ -133,8 +178,8 @@ fn terminal_field(value: Option<&str>, fallback: &str) -> String {
     }
 }
 
-fn exit(code: i32, err: impl std::fmt::Display) -> ! {
-    eprintln!("error: {err}");
+fn exit(code: i32, error: impl std::fmt::Display) -> ! {
+    eprintln!("error: {error}");
     std::process::exit(code);
 }
 
