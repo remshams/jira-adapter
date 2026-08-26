@@ -5,7 +5,7 @@ use httpmock::MockServer;
 
 // base64 of "cli@example.com:cli-test-token"
 const AUTH_HEADER: &str = "Basic Y2xpQGV4YW1wbGUuY29tOmNsaS10ZXN0LXRva2Vu";
-const FIELDS: &str = "summary,status,assignee,reporter,labels,description";
+const FIELDS: &str = "summary,status,assignee,reporter,labels,description,attachment";
 
 fn run(server: &MockServer) -> Output {
     Command::new(env!("CARGO_BIN_EXE_jcli"))
@@ -47,7 +47,12 @@ fn reads_an_issue_with_exact_request_and_output() {
                         "type": "paragraph",
                         "content": [{"type": "text", "text": "Rendered description."}]
                     }]
-                }
+                },
+                "attachment": [{
+                    "id": "opaque-id",
+                    "filename": "report.pdf",
+                    "size": 4
+                }]
             }
         }));
     });
@@ -58,9 +63,28 @@ fn reads_an_issue_with_exact_request_and_output() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "# ABC-123: Fix the thing\n\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Labels: backend, urgent\n\n## Description\n\nRendered description.\n"
+        "# ABC-123: Fix the thing\n\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Labels: backend, urgent\n- Attachments: 1\n\n## Description\n\nRendered description.\n"
     );
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn oversized_issue_metadata_exits_three_without_stdout() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(GET)
+            .path("/rest/api/3/issue/ABC-123")
+            .query_param("fields", FIELDS)
+            .query_param_count(r".*", r".*", 1)
+            .header("Authorization", AUTH_HEADER);
+        then.status(200).body(vec![b' '; 16 * 1024 * 1024 + 1]);
+    });
+
+    let output = run(&server);
+
+    mock.assert_calls(1);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
 }
 
 #[test]
@@ -83,6 +107,6 @@ fn jira_error_exits_three_without_stdout() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "error: Jira API error (HTTP 500): Jira failed[31m [redacted] [redacted]\n"
+        "error: Jira API error (HTTP 500)\n"
     );
 }
