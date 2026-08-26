@@ -1,11 +1,12 @@
 use std::env;
 
 use thiserror::Error;
-use url::Url;
+use url::{Host, Url};
 
 pub const BASE_URL_VAR: &str = "JIRA_BASE_URL";
 pub const EMAIL_VAR: &str = "JIRA_EMAIL";
 pub const API_TOKEN_VAR: &str = "JIRA_API_TOKEN";
+const ALLOW_INSECURE_HTTP_VAR: &str = "JCLI_ALLOW_INSECURE_HTTP";
 
 /// Everything jcli needs to authenticate against a Jira Cloud instance:
 /// the instance base URL plus an email and API token for Basic auth.
@@ -22,7 +23,7 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("environment variable {0} is set but empty")]
     Empty(&'static str),
-    #[error("invalid URL in {0}: expected an http(s) URL without embedded credentials")]
+    #[error("invalid URL in {0}: expected an HTTPS URL without embedded credentials")]
     InvalidBaseUrl(&'static str),
 }
 
@@ -36,7 +37,8 @@ impl Config {
     /// tests never touch the real process environment.
     fn from_vars(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let base_url = required(&get, BASE_URL_VAR)?;
-        let base_url = normalize_base_url(&base_url)?;
+        let allow_insecure_loopback = get(ALLOW_INSECURE_HTTP_VAR).as_deref() == Some("1");
+        let base_url = normalize_base_url(&base_url, allow_insecure_loopback)?;
         Ok(Config {
             base_url,
             email: required(&get, EMAIL_VAR)?,
@@ -59,9 +61,13 @@ fn required(
 /// Ensures the base URL ends in `/` so that `Url::join` with a relative API
 /// path appends to the path instead of replacing its last segment:
 /// `https://x/browse` + `rest/...` would otherwise lose `/browse`.
-fn normalize_base_url(raw: &str) -> Result<Url, ConfigError> {
+fn normalize_base_url(raw: &str, allow_insecure_loopback: bool) -> Result<Url, ConfigError> {
     let mut url = Url::parse(raw).map_err(|_| ConfigError::InvalidBaseUrl(BASE_URL_VAR))?;
-    if !matches!(url.scheme(), "http" | "https")
+    let secure_transport = url.scheme() == "https";
+    let allowed_test_transport = url.scheme() == "http"
+        && allow_insecure_loopback
+        && url.host().is_some_and(is_loopback_host);
+    if (!secure_transport && !allowed_test_transport)
         || !url.has_host()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -72,6 +78,14 @@ fn normalize_base_url(raw: &str) -> Result<Url, ConfigError> {
         url.set_path(&format!("{}/", url.path()));
     }
     Ok(url)
+}
+
+fn is_loopback_host(host: Host<&str>) -> bool {
+    match host {
+        Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+        Host::Ipv4(address) => address.is_loopback(),
+        Host::Ipv6(address) => address.is_loopback(),
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +168,51 @@ mod tests {
         ];
         assert_eq!(
             Config::from_vars(vars(&all)).unwrap_err(),
+            ConfigError::InvalidBaseUrl(BASE_URL_VAR)
+        );
+    }
+
+    #[test]
+    fn rejects_plaintext_http_by_default() {
+        for base_url in ["http://example.com", "http://127.0.0.1:8080"] {
+            let all = [
+                (BASE_URL_VAR, base_url),
+                (EMAIL_VAR, "jane@example.com"),
+                (API_TOKEN_VAR, "token"),
+            ];
+
+            assert_eq!(
+                Config::from_vars(vars(&all)).unwrap_err(),
+                ConfigError::InvalidBaseUrl(BASE_URL_VAR)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_insecure_http_is_limited_to_loopback_testing() {
+        for base_url in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            let all = [
+                (BASE_URL_VAR, base_url),
+                (EMAIL_VAR, "jane@example.com"),
+                (API_TOKEN_VAR, "token"),
+                (ALLOW_INSECURE_HTTP_VAR, "1"),
+            ];
+
+            assert!(Config::from_vars(vars(&all)).is_ok());
+        }
+
+        let remote = [
+            (BASE_URL_VAR, "http://example.com"),
+            (EMAIL_VAR, "jane@example.com"),
+            (API_TOKEN_VAR, "token"),
+            (ALLOW_INSECURE_HTTP_VAR, "1"),
+        ];
+        assert_eq!(
+            Config::from_vars(vars(&remote)).unwrap_err(),
             ConfigError::InvalidBaseUrl(BASE_URL_VAR)
         );
     }
