@@ -15,6 +15,7 @@ fn run(server: &MockServer, directory: &Path, args: &[&str]) -> Output {
         .current_dir(directory)
         .env_clear()
         .env("JIRA_BASE_URL", server.base_url())
+        .env("JCLI_ALLOW_INSECURE_HTTP", "1")
         .env("JIRA_EMAIL", "cli@example.com")
         .env("JIRA_API_TOKEN", "cli-test-token")
         .output()
