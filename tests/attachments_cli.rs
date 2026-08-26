@@ -140,7 +140,7 @@ fn no_attachments_prints_markdown_without_creating_default_directory() {
 }
 
 #[test]
-fn existing_target_file_fails_before_content_and_preserves_bytes() {
+fn existing_target_file_is_replaced_after_a_successful_download() {
     let server = MockServer::start();
     let root = tempfile::tempdir().unwrap();
     let output_directory = root.path().join("downloads");
@@ -160,14 +160,52 @@ fn existing_target_file_fails_before_content_and_preserves_bytes() {
     );
 
     metadata_mock.assert_calls(1);
-    content_mock.assert_calls(0);
-    assert_eq!(output.status.code(), Some(4));
-    assert!(output.stdout.is_empty());
-    assert_eq!(fs::read(&target).unwrap(), b"keep this exact content");
+    content_mock.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"# ABC-123 attachments\n\n- id-6964-file.txt\n"
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(fs::read(&target).unwrap(), b"data");
 }
 
 #[test]
-fn content_failure_removes_nested_directories_and_prints_no_stdout() {
+fn an_unreplaceable_final_directory_is_a_filesystem_failure() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let output_directory = root.path().join("downloads");
+    let final_path = output_directory.join("id-6964-file.txt");
+    fs::create_dir_all(&final_path).unwrap();
+    let metadata_mock = metadata(
+        &server,
+        serde_json::json!([attachment("id", "file.txt", 4)]),
+    );
+    let content_mock = content(&server, "/rest/api/3/attachment/content/id", b"data");
+
+    let output = run(
+        &server,
+        root.path(),
+        &["issue", "attachments", "ABC-123", "--out", "downloads"],
+    );
+
+    metadata_mock.assert_calls(1);
+    content_mock.assert_calls(1);
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, b"error: failed to access attachment files\n");
+    assert!(final_path.is_dir());
+    assert!(!fs::read_dir(&output_directory).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".jcli-attachment-")
+    }));
+}
+
+#[test]
+fn later_content_failure_keeps_an_earlier_download_and_prints_no_stdout() {
     let server = MockServer::start();
     let root = tempfile::tempdir().unwrap();
     let output_directory = root.path().join("nested/downloads");
@@ -205,8 +243,17 @@ fn content_failure_removes_nested_directories_and_prints_no_stdout() {
     second_mock.assert_calls(1);
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
-    assert!(!output_directory.exists());
-    assert!(!root.path().join("nested").exists());
+    assert_eq!(
+        fs::read(output_directory.join("id-6669727374-first.bin")).unwrap(),
+        b"first"
+    );
+    assert!(!fs::read_dir(&output_directory).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".jcli-attachment-")
+    }));
 }
 
 #[test]
@@ -229,7 +276,9 @@ fn size_mismatch_leaves_no_final_files_or_stdout() {
     content_mock.assert_calls(1);
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
-    assert!(!root.path().join("downloads").exists());
+    let downloads = root.path().join("downloads");
+    assert!(downloads.is_dir());
+    assert!(fs::read_dir(downloads).unwrap().next().is_none());
 }
 
 #[test]
@@ -373,7 +422,7 @@ fn zero_byte_download_keeps_exact_stdout_contract() {
 
 #[cfg(unix)]
 #[test]
-fn output_directory_is_private_and_symlink_output_is_rejected() {
+fn output_directory_is_private_and_a_user_provided_symlink_is_used() {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     let server = MockServer::start();
@@ -420,8 +469,12 @@ fn output_directory_is_private_and_symlink_output_is_rejected() {
     );
 
     metadata_mock.assert_calls(1);
-    content_mock.assert_calls(0);
-    assert_eq!(output.status.code(), Some(4));
-    assert!(output.stdout.is_empty());
-    assert!(target.read_dir().unwrap().next().is_none());
+    content_mock.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"# ABC-123 attachments\n\n- 10002-file.bin\n"
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(fs::read(target.join("10002-file.bin")).unwrap(), b"data");
 }

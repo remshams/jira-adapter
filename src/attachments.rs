@@ -1,14 +1,10 @@
 use std::collections::HashSet;
-use std::ffi::OsString;
+use std::fs::DirBuilder;
 use std::io::{self, Read, Write};
-use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
-use cap_std::ambient_authority;
-use cap_std::fs::{Dir, DirBuilder, File, OpenOptions};
-use same_file::Handle;
 use sha2::{Digest, Sha256};
+use tempfile::{Builder, NamedTempFile};
 use thiserror::Error;
 
 use crate::issue_key::IssueKey;
@@ -22,8 +18,6 @@ const FALLBACK_FILENAME: &str = "attachment";
 pub(crate) const MAX_ATTACHMENT_COUNT: usize = 1_000;
 pub(crate) const MAX_ATTACHMENT_SIZE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub(crate) const MAX_TOTAL_ATTACHMENT_SIZE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
-
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) trait ContentSource {
     fn content(&self, id: &str) -> Result<Box<dyn Read>, JiraClientError>;
@@ -53,28 +47,14 @@ pub enum AttachmentError {
     AggregateSizeLimit,
     #[error("generated attachment filenames collide")]
     NameCollision,
-    #[error("an attachment already exists in the output directory")]
-    ExistingFile,
     #[error("attachment content could not be read")]
     SourceRead,
     #[error("downloaded attachment size does not match Jira metadata")]
     SizeMismatch,
     #[error("attachment downloads are not supported on this platform")]
     UnsupportedPlatform,
-    #[error("the attachment output path is unsafe")]
-    UnsafeOutputPath,
-    #[error("failed to access the attachment output directory")]
+    #[error("failed to access attachment files")]
     Filesystem {
-        #[source]
-        source: io::Error,
-    },
-    #[error("failed to publish attachments without overwriting files")]
-    Publish {
-        #[source]
-        source: io::Error,
-    },
-    #[error("failed to clean up attachment output")]
-    Cleanup {
         #[source]
         source: io::Error,
     },
@@ -82,15 +62,7 @@ pub enum AttachmentError {
 
 impl AttachmentError {
     pub fn is_filesystem(&self) -> bool {
-        matches!(
-            self,
-            Self::ExistingFile
-                | Self::UnsupportedPlatform
-                | Self::UnsafeOutputPath
-                | Self::Filesystem { .. }
-                | Self::Publish { .. }
-                | Self::Cleanup { .. }
-        )
+        matches!(self, Self::UnsupportedPlatform | Self::Filesystem { .. })
     }
 
     fn filesystem(source: io::Error) -> Self {
@@ -127,15 +99,8 @@ struct PlannedAttachment {
     name: String,
 }
 
-struct StagedAttachment {
-    plan: PlannedAttachment,
-    temporary_name: String,
-    file: File,
-    published: bool,
-}
-
-/// Downloads every attachment, verifies every staged file, and only then
-/// publishes final names. The returned manifest remains in Jira response order.
+/// Downloads attachments in Jira response order. Each verified temporary file
+/// replaces its final path before the next download starts.
 pub fn download_all(
     source: &impl ContentSource,
     metadata: &[Attachment],
@@ -150,72 +115,64 @@ pub fn download_all(
         return Ok(DownloadManifest { names: Vec::new() });
     }
 
-    let mut directory = OutputDirectory::prepare(output_directory)?;
-    let result = stage_and_publish(source, plans, directory.dir());
+    prepare_output_directory(output_directory)?;
+    let mut names = Vec::with_capacity(plans.len());
+    for plan in plans {
+        download_one(source, &plan, output_directory)?;
+        names.push(plan.name);
+    }
 
-    match result {
-        Ok(names) => {
-            directory.keep();
-            Ok(DownloadManifest { names })
+    Ok(DownloadManifest { names })
+}
+
+fn prepare_output_directory(path: &Path) -> Result<(), AttachmentError> {
+    let mut builder = DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path).map_err(AttachmentError::filesystem)
+}
+
+fn download_one(
+    source: &impl ContentSource,
+    plan: &PlannedAttachment,
+    output_directory: &Path,
+) -> Result<(), AttachmentError> {
+    let mut temporary = create_temporary_file(output_directory)?;
+    let download = (|| {
+        let mut content = source.content(&plan.id)?;
+        copy_exact_size(&mut content, &mut temporary, plan.size)?;
+        temporary.flush().map_err(AttachmentError::filesystem)
+    })();
+    if let Err(error) = download {
+        return fail_after_cleanup(temporary, error);
+    }
+
+    match temporary.persist(output_directory.join(&plan.name)) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let tempfile::PersistError { error, file } = error;
+            fail_after_cleanup(file, AttachmentError::filesystem(error))
         }
-        Err(error) => match directory.remove_created() {
-            Ok(()) => Err(error),
-            Err(source) => Err(AttachmentError::Cleanup { source }),
-        },
     }
 }
 
-fn stage_and_publish(
-    source: &impl ContentSource,
-    plans: Vec<PlannedAttachment>,
-    directory: &Dir,
-) -> Result<Vec<String>, AttachmentError> {
-    preflight_output(directory, &plans)?;
-    let mut staging_directory = StagingDirectory::create(directory)?;
-    let staging = staging_directory
-        .dir
-        .as_ref()
-        .expect("staging directory is available");
-    let mut staged = Vec::with_capacity(plans.len());
+fn fail_after_cleanup(
+    temporary: NamedTempFile,
+    error: AttachmentError,
+) -> Result<(), AttachmentError> {
+    temporary.close().map_err(AttachmentError::filesystem)?;
+    Err(error)
+}
 
-    let result = (|| {
-        for plan in plans {
-            match stage_one(source, plan, staging) {
-                Ok(attachment) => staged.push(attachment),
-                Err(error) => {
-                    cleanup_staged(staging, &staged)
-                        .map_err(|source| AttachmentError::Cleanup { source })?;
-                    return Err(error);
-                }
-            }
-        }
-
-        publish_all(directory, staging, &mut staged)?;
-        Ok(staged
-            .iter()
-            .map(|attachment| attachment.plan.name.clone())
-            .collect())
-    })();
-
-    match result {
-        Ok(names) => {
-            // Publication is the commit point. Cleanup failures after every
-            // final hard link exists must not turn a successful download into
-            // a reported failure with files already visible.
-            let _ = cleanup_staged(staging, &staged);
-            let _ = staging_directory.remove();
-            Ok(names)
-        }
-        Err(error) => {
-            let staged_cleanup = cleanup_staged(staging, &staged);
-            let directory_cleanup = staging_directory.remove();
-            if let Some(source) = staged_cleanup.err().or_else(|| directory_cleanup.err()) {
-                Err(AttachmentError::Cleanup { source })
-            } else {
-                Err(error)
-            }
-        }
-    }
+fn create_temporary_file(directory: &Path) -> Result<NamedTempFile, AttachmentError> {
+    Builder::new()
+        .prefix(".jcli-attachment-")
+        .tempfile_in(directory)
+        .map_err(AttachmentError::filesystem)
 }
 
 fn plan_downloads(metadata: &[Attachment]) -> Result<Vec<PlannedAttachment>, AttachmentError> {
@@ -270,72 +227,6 @@ fn detect_name_collisions(plans: &[PlannedAttachment]) -> Result<(), AttachmentE
     }
 }
 
-fn preflight_output(directory: &Dir, plans: &[PlannedAttachment]) -> Result<(), AttachmentError> {
-    for plan in plans {
-        match directory.symlink_metadata(&plan.name) {
-            Ok(_) => return Err(AttachmentError::ExistingFile),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(AttachmentError::filesystem(error)),
-        }
-    }
-    Ok(())
-}
-
-fn stage_one(
-    source: &impl ContentSource,
-    plan: PlannedAttachment,
-    directory: &Dir,
-) -> Result<StagedAttachment, AttachmentError> {
-    let (temporary_name, mut file) = create_temporary_file(directory)?;
-    let stage_result = (|| {
-        let mut content = source.content(&plan.id)?;
-        copy_exact_size(&mut content, &mut file, plan.size)?;
-        file.flush().map_err(AttachmentError::filesystem)
-    })();
-
-    match stage_result {
-        Ok(()) => Ok(StagedAttachment {
-            plan,
-            temporary_name,
-            file,
-            published: false,
-        }),
-        Err(error) => match remove_if_present(directory, &temporary_name) {
-            Ok(()) => Err(error),
-            Err(source) => Err(AttachmentError::Cleanup { source }),
-        },
-    }
-}
-
-fn create_temporary_file(directory: &Dir) -> Result<(String, File), AttachmentError> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use cap_std::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-
-    for _ in 0..128 {
-        let name = unique_internal_name("attachment");
-        match directory.open_with(&name, &options) {
-            Ok(file) => return Ok((name, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(AttachmentError::filesystem(error)),
-        }
-    }
-
-    Err(AttachmentError::filesystem(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not allocate a staging file",
-    )))
-}
-
-fn unique_internal_name(kind: &str) -> String {
-    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!(".jcli-{kind}-{}-{sequence:016x}", std::process::id())
-}
-
 fn copy_exact_size(
     source: &mut dyn Read,
     destination: &mut dyn Write,
@@ -371,410 +262,6 @@ fn copy_exact_size(
         return Err(AttachmentError::SizeMismatch);
     }
     Ok(())
-}
-
-fn publish_all(
-    directory: &Dir,
-    staging: &Dir,
-    staged: &mut [StagedAttachment],
-) -> Result<(), AttachmentError> {
-    for index in 0..staged.len() {
-        let attachment = &staged[index];
-        if let Err(publish_error) =
-            staging.hard_link(&attachment.temporary_name, directory, &attachment.plan.name)
-        {
-            let cleanup = rollback_and_cleanup(directory, staging, staged);
-            if let Err(source) = cleanup {
-                return Err(AttachmentError::Cleanup { source });
-            }
-            return Err(AttachmentError::Publish {
-                source: publish_error,
-            });
-        }
-        staged[index].published = true;
-    }
-
-    Ok(())
-}
-
-fn rollback_and_cleanup(
-    directory: &Dir,
-    staging: &Dir,
-    staged: &mut [StagedAttachment],
-) -> io::Result<()> {
-    let rollback = rollback_published(directory, staging, staged);
-    let cleanup = cleanup_staged(staging, staged);
-    rollback.and(cleanup)
-}
-
-fn cleanup_staged(directory: &Dir, staged: &[StagedAttachment]) -> io::Result<()> {
-    let mut first_error = None;
-    for attachment in staged {
-        if let Err(error) = remove_if_present(directory, &attachment.temporary_name)
-            && first_error.is_none()
-        {
-            first_error = Some(error);
-        }
-    }
-    first_error.map_or(Ok(()), Err)
-}
-
-fn rollback_published(
-    directory: &Dir,
-    staging: &Dir,
-    staged: &mut [StagedAttachment],
-) -> io::Result<()> {
-    let mut first_error = None;
-    for attachment in staged.iter_mut().rev().filter(|item| item.published) {
-        let quarantine_name = unique_internal_name("rollback");
-        match directory.rename(&attachment.plan.name, staging, &quarantine_name) {
-            Ok(()) => match quarantined_entry_is_same(staging, &quarantine_name, attachment) {
-                Ok(true) => {
-                    if let Err(error) = remove_if_present(staging, &quarantine_name) {
-                        if first_error.is_none() {
-                            first_error = Some(error);
-                        }
-                    } else {
-                        attachment.published = false;
-                    }
-                }
-                Ok(false) => {
-                    let restore =
-                        staging.hard_link(&quarantine_name, directory, &attachment.plan.name);
-                    if restore.is_ok() {
-                        let _ = remove_if_present(staging, &quarantine_name);
-                    }
-                    attachment.published = false;
-                    if first_error.is_none() {
-                        first_error = Some(restore.err().unwrap_or_else(|| {
-                            io::Error::other(
-                                "published attachment identity changed during rollback",
-                            )
-                        }));
-                    }
-                }
-                Err(error) if first_error.is_none() => first_error = Some(error),
-                Err(_) => {}
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                attachment.published = false;
-            }
-            Err(error) if first_error.is_none() => first_error = Some(error),
-            Err(_) => {}
-        }
-    }
-    first_error.map_or(Ok(()), Err)
-}
-
-fn quarantined_entry_is_same(
-    staging: &Dir,
-    quarantine_name: &str,
-    attachment: &StagedAttachment,
-) -> io::Result<bool> {
-    let metadata = staging.symlink_metadata(quarantine_name)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Ok(false);
-    }
-    let quarantined = staging.open(quarantine_name)?;
-    same_cap_file(&quarantined, &attachment.file)
-}
-
-fn same_cap_file(first: &File, second: &File) -> io::Result<bool> {
-    let first = Handle::from_file(first.try_clone()?.into_std())?;
-    let second = Handle::from_file(second.try_clone()?.into_std())?;
-    Ok(first == second)
-}
-
-fn remove_if_present(directory: &Dir, name: &str) -> io::Result<()> {
-    match directory.remove_file(name) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-struct StagingDirectory {
-    dir: Option<Dir>,
-}
-
-impl StagingDirectory {
-    fn create(parent: &Dir) -> Result<Self, AttachmentError> {
-        for _ in 0..128 {
-            let name = OsString::from(unique_internal_name("stage"));
-            match create_private_directory(parent, &name)? {
-                true => {
-                    let dir = match open_verified_directory(parent, &name) {
-                        Ok(dir) => dir,
-                        Err(error) => {
-                            let _ = parent.remove_dir(&name);
-                            return Err(error);
-                        }
-                    };
-                    return Ok(Self { dir: Some(dir) });
-                }
-                false => continue,
-            }
-        }
-        Err(AttachmentError::filesystem(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not allocate a staging directory",
-        )))
-    }
-
-    fn remove(&mut self) -> io::Result<()> {
-        match self.dir.take() {
-            Some(directory) => directory.remove_open_dir(),
-            None => Ok(()),
-        }
-    }
-}
-
-impl Drop for StagingDirectory {
-    fn drop(&mut self) {
-        let _ = self.remove();
-    }
-}
-
-#[derive(Default)]
-struct CreatedDirectories {
-    directories: Vec<Dir>,
-}
-
-impl CreatedDirectories {
-    fn take(&mut self) -> Vec<Dir> {
-        std::mem::take(&mut self.directories)
-    }
-}
-
-impl Drop for CreatedDirectories {
-    fn drop(&mut self) {
-        for directory in self.directories.drain(..).rev() {
-            let _ = directory.remove_open_dir();
-        }
-    }
-}
-
-struct OutputDirectory {
-    dir: Option<Dir>,
-    created: Vec<Dir>,
-}
-
-impl OutputDirectory {
-    fn prepare(path: &Path) -> Result<Self, AttachmentError> {
-        let (anchor, components) = split_output_path(path)?;
-        let mut created = CreatedDirectories::default();
-        let mut current = Dir::open_ambient_dir(anchor, ambient_authority())
-            .map_err(AttachmentError::filesystem)?;
-        let mut parent_trust = verify_output_directory_trust(&current)?;
-        if !directory_has_trusted_owner(&current)? {
-            return Err(AttachmentError::UnsafeOutputPath);
-        }
-
-        for component in components {
-            // Every parent stays open and is checked before resolving the next
-            // name. On Unix, that means no other local account can substitute
-            // a child between creation and the no-follow open below.
-            let was_created = create_private_directory(&current, &component)?;
-            let child = open_verified_directory(&current, &component)?;
-            if was_created {
-                created
-                    .directories
-                    .push(child.try_clone().map_err(AttachmentError::filesystem)?);
-            }
-            let child_trust = verify_output_directory_trust(&child)?;
-            if !directory_has_trusted_owner(&child)?
-                || (parent_trust == DirectoryTrust::StickyShared
-                    && !directory_is_owned_by_current_user(&child)?)
-            {
-                return Err(AttachmentError::UnsafeOutputPath);
-            }
-            current = child;
-            parent_trust = child_trust;
-        }
-
-        // A sticky shared directory can safely contain a private child, but
-        // cannot be the output directory itself because other users may add
-        // colliding names while files are being published.
-        if parent_trust == DirectoryTrust::StickyShared
-            || !directory_is_owned_by_current_user(&current)?
-        {
-            return Err(AttachmentError::UnsafeOutputPath);
-        }
-
-        Ok(Self {
-            dir: Some(current),
-            created: created.take(),
-        })
-    }
-
-    fn dir(&self) -> &Dir {
-        self.dir.as_ref().expect("output directory is available")
-    }
-
-    fn keep(&mut self) {
-        self.created.clear();
-    }
-
-    fn remove_created(&mut self) -> io::Result<()> {
-        self.dir.take();
-        let mut first_error = None;
-        for directory in self.created.drain(..).rev() {
-            if let Err(error) = directory.remove_open_dir()
-                && error.kind() != io::ErrorKind::NotFound
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-            }
-        }
-        first_error.map_or(Ok(()), Err)
-    }
-}
-
-impl Drop for OutputDirectory {
-    fn drop(&mut self) {
-        let _ = self.remove_created();
-    }
-}
-
-fn split_output_path(path: &Path) -> Result<(PathBuf, Vec<OsString>), AttachmentError> {
-    let mut anchor = PathBuf::new();
-    let mut components = Vec::new();
-
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => anchor.push(prefix.as_os_str()),
-            Component::RootDir => anchor.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => return Err(AttachmentError::UnsafeOutputPath),
-            Component::Normal(value) => components.push(value.to_os_string()),
-        }
-    }
-
-    if anchor.as_os_str().is_empty() {
-        anchor.push(".");
-    }
-    Ok((anchor, components))
-}
-
-fn create_private_directory(parent: &Dir, name: &OsString) -> Result<bool, AttachmentError> {
-    let mut builder = DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use cap_std::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-
-    match parent.create_dir_with(name, &builder) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-        Err(error) => Err(AttachmentError::filesystem(error)),
-    }
-}
-
-fn open_verified_directory(parent: &Dir, name: &OsString) -> Result<Dir, AttachmentError> {
-    let metadata = parent
-        .symlink_metadata(name)
-        .map_err(AttachmentError::filesystem)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(AttachmentError::UnsafeOutputPath);
-    }
-
-    // `Dir::open_dir` follows a final symlink. Opening with
-    // `FollowSymlinks::No` makes the handle itself, rather than a preceding
-    // path check, the proof that this component is a directory and not a
-    // symlink or Windows reparse point.
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .maybe_dir(true)
-        .follow(FollowSymlinks::No);
-    let opened = Dir::from_std_file(
-        parent
-            .open_with(name, &options)
-            .map_err(AttachmentError::filesystem)?
-            .into_std(),
-    );
-    let metadata = opened.dir_metadata().map_err(AttachmentError::filesystem)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(AttachmentError::UnsafeOutputPath);
-    }
-    Ok(opened)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DirectoryTrust {
-    Private,
-    StickyShared,
-}
-
-#[cfg(unix)]
-fn verify_output_directory_trust(directory: &Dir) -> Result<DirectoryTrust, AttachmentError> {
-    use cap_std::fs::MetadataExt;
-
-    let mode = directory
-        .dir_metadata()
-        .map_err(AttachmentError::filesystem)?
-        .mode();
-    if mode & 0o022 == 0 {
-        Ok(DirectoryTrust::Private)
-    } else if mode & 0o1000 != 0 {
-        // Sticky directories such as /tmp may be traversed only to reach an
-        // owner-controlled child. The caller never publishes directly into
-        // one because it is shared with other local accounts.
-        Ok(DirectoryTrust::StickyShared)
-    } else {
-        Err(AttachmentError::UnsafeOutputPath)
-    }
-}
-
-#[cfg(unix)]
-fn directory_is_owned_by_current_user(directory: &Dir) -> Result<bool, AttachmentError> {
-    Ok(directory_owner(directory)? == effective_user_id())
-}
-
-#[cfg(unix)]
-fn directory_has_trusted_owner(directory: &Dir) -> Result<bool, AttachmentError> {
-    Ok(owner_is_trusted(
-        directory_owner(directory)?,
-        effective_user_id(),
-    ))
-}
-
-#[cfg(unix)]
-fn owner_is_trusted(owner: u32, effective_user: u32) -> bool {
-    owner == 0 || owner == effective_user
-}
-
-#[cfg(unix)]
-fn directory_owner(directory: &Dir) -> Result<u32, AttachmentError> {
-    use cap_std::fs::MetadataExt;
-
-    Ok(directory
-        .dir_metadata()
-        .map_err(AttachmentError::filesystem)?
-        .uid())
-}
-
-#[cfg(unix)]
-fn effective_user_id() -> u32 {
-    // SAFETY: geteuid reads the effective user ID and has no memory or
-    // process-state preconditions.
-    unsafe { libc::geteuid() }
-}
-
-#[cfg(not(unix))]
-fn verify_output_directory_trust(_directory: &Dir) -> Result<DirectoryTrust, AttachmentError> {
-    Err(AttachmentError::UnsupportedPlatform)
-}
-
-#[cfg(not(unix))]
-fn directory_is_owned_by_current_user(_directory: &Dir) -> Result<bool, AttachmentError> {
-    Ok(false)
-}
-
-#[cfg(not(unix))]
-fn directory_has_trusted_owner(_directory: &Dir) -> Result<bool, AttachmentError> {
-    Ok(false)
 }
 
 fn generated_name(id: &str, filename: &str) -> String {
@@ -886,6 +373,8 @@ mod tests {
     use std::fs;
     use std::io::Cursor;
     use std::rc::Rc;
+    use std::sync::{Mutex, mpsc};
+    use std::thread;
 
     use httpmock::Method::GET;
     use httpmock::MockServer;
@@ -1062,20 +551,162 @@ mod tests {
         assert_eq!(source.calls.get(), 0);
     }
 
+    struct FinalPathCheckingReader {
+        content: Cursor<Vec<u8>>,
+        final_path: std::path::PathBuf,
+        expected_old_content: Vec<u8>,
+    }
+
+    impl Read for FinalPathCheckingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            assert_eq!(
+                fs::read(&self.final_path).unwrap(),
+                self.expected_old_content
+            );
+            self.content.read(buffer)
+        }
+    }
+
+    fn assert_no_temporary_files(directory: &Path) {
+        assert!(!fs::read_dir(directory).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".jcli-attachment-")
+        }));
+    }
+
     #[test]
-    fn existing_final_files_fail_before_content_is_requested() {
+    fn existing_file_is_atomically_replaced_after_success() {
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("out");
         fs::create_dir(&output).unwrap();
-        let item = attachment("id", "report.pdf", 4);
+        let item = attachment("id", "report.pdf", 8);
         let name = generated_name(&item.id, &item.filename);
-        fs::write(output.join(name), b"old").unwrap();
-        let source = FakeSource::bytes(&[b"data"]);
+        let final_path = output.join(&name);
+        fs::write(&final_path, b"old content").unwrap();
+        let source = FakeSource::new(vec![Ok(Box::new(FinalPathCheckingReader {
+            content: Cursor::new(b"new data".to_vec()),
+            final_path: final_path.clone(),
+            expected_old_content: b"old content".to_vec(),
+        }))]);
+
+        let manifest = download_all(&source, &[item], &output).unwrap();
+
+        assert_eq!(manifest.names, [name]);
+        assert_eq!(source.calls.get(), 1);
+        assert_eq!(fs::read(final_path).unwrap(), b"new data");
+        assert_no_temporary_files(&output);
+    }
+
+    #[test]
+    fn failed_replacement_keeps_the_old_file_and_removes_its_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("out");
+        fs::create_dir(&output).unwrap();
+        let item = attachment("id", "report.pdf", 7);
+        let name = generated_name(&item.id, &item.filename);
+        let final_path = output.join(name);
+        fs::write(&final_path, b"old content").unwrap();
+        let source = FakeSource::bytes(&[b"short"]);
 
         let error = download_all(&source, &[item], &output).unwrap_err();
 
-        assert!(matches!(error, AttachmentError::ExistingFile));
-        assert_eq!(source.calls.get(), 0);
+        assert!(matches!(error, AttachmentError::SizeMismatch));
+        assert_eq!(fs::read(final_path).unwrap(), b"old content");
+        assert_no_temporary_files(&output);
+    }
+
+    struct BlockingAtEofSource {
+        content: Vec<u8>,
+        ready: mpsc::Sender<()>,
+        release: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+
+    impl ContentSource for BlockingAtEofSource {
+        fn content(&self, _id: &str) -> Result<Box<dyn Read>, JiraClientError> {
+            Ok(Box::new(BlockingAtEofReader {
+                content: Cursor::new(self.content.clone()),
+                ready: self.ready.clone(),
+                release: self.release.lock().unwrap().take().unwrap(),
+                waited: false,
+            }))
+        }
+    }
+
+    struct BlockingAtEofReader {
+        content: Cursor<Vec<u8>>,
+        ready: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        waited: bool,
+    }
+
+    impl Read for BlockingAtEofReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.waited && self.content.position() == self.content.get_ref().len() as u64 {
+                self.ready.send(()).unwrap();
+                self.release.recv().unwrap();
+                self.waited = true;
+            }
+            self.content.read(buffer)
+        }
+    }
+
+    #[test]
+    fn concurrent_successful_runs_are_last_writer_wins() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("out");
+        let item = attachment("id", "report.pdf", 5);
+        let first_item = item.clone();
+        let first_output = output.clone();
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let first_run = thread::spawn(move || {
+            let source = BlockingAtEofSource {
+                content: b"first".to_vec(),
+                ready: ready_sender,
+                release: Mutex::new(Some(release_receiver)),
+            };
+            download_all(&source, &[first_item], &first_output)
+        });
+
+        ready_receiver.recv().unwrap();
+        let second_result = download_all(&FakeSource::bytes(&[b"later"]), &[item], &output);
+        release_sender.send(()).unwrap();
+        let first_result = first_run.join().unwrap();
+
+        second_result.unwrap();
+        first_result.unwrap();
+        assert_eq!(
+            fs::read(output.join(generated_name("id", "report.pdf"))).unwrap(),
+            b"first"
+        );
+        assert_no_temporary_files(&output);
+    }
+
+    #[test]
+    fn earlier_replacement_remains_when_a_later_download_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("out");
+        fs::create_dir(&output).unwrap();
+        let metadata = [
+            attachment("one", "first.txt", 5),
+            attachment("two", "second.txt", 6),
+        ];
+        let first_path = output.join(generated_name("one", "first.txt"));
+        let second_path = output.join(generated_name("two", "second.txt"));
+        fs::write(&first_path, b"old first").unwrap();
+        fs::write(&second_path, b"old second").unwrap();
+        let source = FakeSource::bytes(&[b"first", b"short"]);
+
+        let error = download_all(&source, &metadata, &output).unwrap_err();
+
+        assert!(matches!(error, AttachmentError::SizeMismatch));
+        assert_eq!(source.calls.get(), 2);
+        assert_eq!(fs::read(first_path).unwrap(), b"first");
+        assert_eq!(fs::read(second_path).unwrap(), b"old second");
+        assert_no_temporary_files(&output);
     }
 
     #[test]
@@ -1106,13 +737,7 @@ mod tests {
             fs::read(output.join(&expected_names[1])).unwrap(),
             b"second"
         );
-        assert!(!fs::read_dir(&output).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".jcli-attachment-")
-        }));
+        assert_no_temporary_files(&output);
     }
 
     #[test]
@@ -1156,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn size_mismatch_removes_temps_and_a_created_empty_directory() {
+    fn size_mismatch_removes_the_temporary_file() {
         for bytes in [&b"short"[..], &b"too long"[..]] {
             let root = tempfile::tempdir().unwrap();
             let output = root.path().join("out");
@@ -1166,7 +791,9 @@ mod tests {
                 download_all(&source, &[attachment("id", "file.bin", 7)], &output).unwrap_err();
 
             assert!(matches!(error, AttachmentError::SizeMismatch));
-            assert!(!output.exists());
+            assert!(output.is_dir());
+            assert_no_temporary_files(&output);
+            assert!(fs::read_dir(&output).unwrap().next().is_none());
         }
     }
 
@@ -1186,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn source_read_failures_clean_partial_staging() {
+    fn source_read_failures_remove_the_partial_temporary_file() {
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("out");
         let source = FakeSource::new(vec![Ok(Box::new(FailingReader { yielded: false }))]);
@@ -1194,19 +821,25 @@ mod tests {
         let error = download_all(&source, &[attachment("id", "file.bin", 6)], &output).unwrap_err();
 
         assert!(matches!(error, AttachmentError::SourceRead));
-        assert!(!output.exists());
+        assert_no_temporary_files(&output);
+        assert!(fs::read_dir(&output).unwrap().next().is_none());
     }
 
     #[test]
-    fn ordinary_failure_removes_every_nested_directory_it_created() {
+    fn unreplaceable_final_directory_is_a_filesystem_error() {
         let root = tempfile::tempdir().unwrap();
-        let output = root.path().join("one/two/three");
-        let source = FakeSource::bytes(&[b"short"]);
+        let output = root.path().join("out");
+        fs::create_dir(&output).unwrap();
+        let item = attachment("1", "file.bin", 4);
+        let final_path = output.join(generated_name(&item.id, &item.filename));
+        fs::create_dir(&final_path).unwrap();
+        let source = FakeSource::bytes(&[b"data"]);
 
-        let error = download_all(&source, &[attachment("1", "file.bin", 7)], &output).unwrap_err();
+        let error = download_all(&source, &[item], &output).unwrap_err();
 
-        assert!(matches!(error, AttachmentError::SizeMismatch));
-        assert!(!root.path().join("one").exists());
+        assert!(error.is_filesystem());
+        assert!(final_path.is_dir());
+        assert_no_temporary_files(&output);
     }
 
     #[test]
@@ -1248,88 +881,6 @@ mod tests {
         assert!(error.is_filesystem());
     }
 
-    fn staged_attachment(directory: &Dir, id: &str, name: &str, bytes: &[u8]) -> StagedAttachment {
-        let (temporary_name, mut file) = create_temporary_file(directory).unwrap();
-        file.write_all(bytes).unwrap();
-        StagedAttachment {
-            plan: PlannedAttachment {
-                id: id.to_string(),
-                size: bytes.len() as u64,
-                name: name.to_string(),
-            },
-            temporary_name,
-            file,
-            published: false,
-        }
-    }
-
-    #[test]
-    fn publication_is_no_clobber_and_rolls_back_earlier_files() {
-        let root = tempfile::tempdir().unwrap();
-        let directory = Dir::open_ambient_dir(root.path(), ambient_authority()).unwrap();
-        let mut staged = vec![
-            staged_attachment(&directory, "one", "first", b"first"),
-            staged_attachment(&directory, "two", "second", b"second"),
-        ];
-        fs::write(root.path().join("second"), b"racer").unwrap();
-
-        let error = publish_all(&directory, &directory, &mut staged).unwrap_err();
-
-        assert!(matches!(error, AttachmentError::Publish { .. }));
-        assert!(!root.path().join("first").exists());
-        assert_eq!(fs::read(root.path().join("second")).unwrap(), b"racer");
-    }
-
-    #[test]
-    fn rollback_does_not_delete_a_replaced_published_entry() {
-        let root = tempfile::tempdir().unwrap();
-        let directory = Dir::open_ambient_dir(root.path(), ambient_authority()).unwrap();
-        let mut staged = vec![staged_attachment(&directory, "one", "first", b"first")];
-        directory
-            .hard_link(&staged[0].temporary_name, &directory, "first")
-            .unwrap();
-        staged[0].published = true;
-        directory.remove_file("first").unwrap();
-        fs::write(root.path().join("first"), b"replacement").unwrap();
-
-        let error = rollback_published(&directory, &directory, &mut staged).unwrap_err();
-
-        assert_eq!(fs::read(root.path().join("first")).unwrap(), b"replacement");
-        assert_eq!(
-            error.to_string(),
-            "published attachment identity changed during rollback"
-        );
-        cleanup_staged(&directory, &staged).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rollback_does_not_follow_a_replaced_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let root = tempfile::tempdir().unwrap();
-        let directory = Dir::open_ambient_dir(root.path(), ambient_authority()).unwrap();
-        let outside = root.path().join("outside");
-        fs::write(&outside, b"replacement").unwrap();
-        let mut staged = vec![staged_attachment(&directory, "one", "first", b"first")];
-        directory
-            .hard_link(&staged[0].temporary_name, &directory, "first")
-            .unwrap();
-        staged[0].published = true;
-        directory.remove_file("first").unwrap();
-        symlink(&outside, root.path().join("first")).unwrap();
-
-        assert!(rollback_published(&directory, &directory, &mut staged).is_err());
-        assert_eq!(fs::read(&outside).unwrap(), b"replacement");
-        assert!(
-            fs::symlink_metadata(root.path().join("first"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        cleanup_staged(&directory, &staged).unwrap();
-    }
-
     #[test]
     fn error_messages_do_not_echo_metadata_or_output_paths() {
         let secret_id = "secret/id";
@@ -1343,10 +894,9 @@ mod tests {
             AttachmentError::AttachmentSizeLimit,
             AttachmentError::AggregateSizeLimit,
             AttachmentError::NameCollision,
-            AttachmentError::ExistingFile,
             AttachmentError::SourceRead,
             AttachmentError::SizeMismatch,
-            AttachmentError::UnsafeOutputPath,
+            AttachmentError::filesystem(io::Error::other(secret_path.to_string())),
         ];
 
         for error in errors {
@@ -1358,124 +908,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn created_directory_guard_removes_only_directories_it_created() {
-        let root = tempfile::tempdir().unwrap();
-        let created = root.path().join("created");
-        {
-            let _guard = OutputDirectory::prepare(&created).unwrap();
-            assert!(created.is_dir());
-        }
-        assert!(!created.exists());
-
-        let existing = root.path().join("existing");
-        fs::create_dir(&existing).unwrap();
-        {
-            let _guard = OutputDirectory::prepare(&existing).unwrap();
-        }
-        assert!(existing.is_dir());
-    }
-
     #[cfg(unix)]
     #[test]
-    fn new_output_directories_are_owner_only() {
+    fn new_output_directories_and_temporary_files_are_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("nested/out");
-        let mut guard = OutputDirectory::prepare(&output).unwrap();
+        prepare_output_directory(&output).unwrap();
+        let temporary = create_temporary_file(&output).unwrap();
+        let temporary_path = temporary.path().to_owned();
 
+        for path in [root.path().join("nested"), output.clone(), temporary_path] {
+            assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o077, 0);
+        }
+
+        let final_path = output.join("final");
+        temporary.persist(&final_path).unwrap();
         assert_eq!(
-            fs::metadata(root.path().join("nested"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
+            fs::metadata(final_path).unwrap().permissions().mode() & 0o077,
+            0
         );
-        assert_eq!(
-            fs::metadata(&output).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        guard.keep();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlink_outputs_and_publicly_writable_existing_outputs_are_rejected() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let root = tempfile::tempdir().unwrap();
-        let target = root.path().join("target");
-        fs::create_dir(&target).unwrap();
-        let link = root.path().join("link");
-        symlink(&target, &link).unwrap();
-        assert!(matches!(
-            OutputDirectory::prepare(&link),
-            Err(AttachmentError::UnsafeOutputPath)
-        ));
-
-        let nested_link = root.path().join("nested-link");
-        symlink(&target, &nested_link).unwrap();
-        assert!(matches!(
-            OutputDirectory::prepare(&nested_link.join("output")),
-            Err(AttachmentError::UnsafeOutputPath)
-        ));
-
-        let writable = root.path().join("writable");
-        fs::create_dir(&writable).unwrap();
-        fs::set_permissions(&writable, fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(matches!(
-            OutputDirectory::prepare(&writable),
-            Err(AttachmentError::UnsafeOutputPath)
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn only_root_or_the_effective_user_is_a_trusted_directory_owner() {
-        assert!(owner_is_trusted(0, 1000));
-        assert!(owner_is_trusted(1000, 1000));
-        assert!(!owner_is_trusted(1001, 1000));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sticky_shared_parents_require_an_owner_controlled_output_directory() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let root = tempfile::tempdir().unwrap();
-        let shared = root.path().join("shared");
-        fs::create_dir(&shared).unwrap();
-        fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
-        let owned = shared.join("owned");
-        fs::create_dir(&owned).unwrap();
-
-        assert!(matches!(
-            OutputDirectory::prepare(&shared),
-            Err(AttachmentError::UnsafeOutputPath)
-        ));
-        let mut output = OutputDirectory::prepare(&owned).unwrap();
-        output.keep();
-    }
-
-    #[test]
-    fn root_and_dot_paths_have_no_untrusted_components() {
-        let (root_anchor, root_components) = split_output_path(Path::new("/")).unwrap();
-        assert_eq!(root_anchor, PathBuf::from("/"));
-        assert!(root_components.is_empty());
-
-        let (dot_anchor, dot_components) = split_output_path(Path::new(".")).unwrap();
-        assert_eq!(dot_anchor, PathBuf::from("."));
-        assert!(dot_components.is_empty());
-    }
-
-    #[test]
-    fn parent_traversal_is_rejected() {
-        assert!(matches!(
-            OutputDirectory::prepare(Path::new("safe/../unsafe")),
-            Err(AttachmentError::UnsafeOutputPath)
-        ));
     }
 
     #[test]
