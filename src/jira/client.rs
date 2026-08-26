@@ -20,8 +20,11 @@ pub(crate) const MAX_ATTACHMENT_METADATA_BYTES: usize = 16 * 1024 * 1024;
 pub enum JiraClientError {
     #[error("failed to build request URL")]
     InvalidUrl,
-    #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("HTTP request failed")]
+    Http {
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("attachment HTTP request failed")]
     AttachmentHttp {
         #[source]
@@ -55,6 +58,12 @@ pub enum JiraClientError {
     AttachmentStatus { status: u16 },
 }
 
+impl JiraClientError {
+    fn http(source: reqwest::Error) -> Self {
+        Self::Http { source }
+    }
+}
+
 /// Blocking, GET-only client for the Jira Cloud REST API v3.
 ///
 /// There is deliberately no method here that sends another HTTP verb; making
@@ -69,11 +78,18 @@ pub struct JiraClient {
 
 impl JiraClient {
     pub fn new(config: &Config) -> Result<Self, JiraClientError> {
-        let http = Client::builder().user_agent(USER_AGENT).build()?;
+        let http = Client::builder()
+            .user_agent(USER_AGENT)
+            .referer(false)
+            .redirect(same_origin_redirect_policy())
+            .build()
+            .map_err(JiraClientError::http)?;
         let attachment_http = Client::builder()
             .user_agent(USER_AGENT)
+            .referer(false)
             .redirect(Policy::none())
-            .build()?;
+            .build()
+            .map_err(JiraClientError::http)?;
         Ok(JiraClient {
             http,
             attachment_http,
@@ -160,7 +176,7 @@ impl JiraClient {
     ) -> Result<T, JiraClientError> {
         let response = self.authenticated_get(url)?;
         let response = Self::check_json_response(response, error_resource)?;
-        Ok(response.json()?)
+        response.json().map_err(JiraClientError::http)
     }
 
     fn get_bounded_metadata_json_url<T: DeserializeOwned>(
@@ -202,12 +218,34 @@ impl JiraClient {
     }
 
     fn authenticated_get(&self, url: Url) -> Result<Response, JiraClientError> {
-        Ok(self
-            .http
+        self.http
             .get(url)
             .basic_auth(&self.email, Some(&self.api_token))
-            .send()?)
+            .send()
+            .map_err(JiraClientError::http)
     }
+}
+
+fn same_origin_redirect_policy() -> Policy {
+    Policy::custom(|attempt| {
+        let same_origin = attempt
+            .previous()
+            .first()
+            .is_some_and(|original| urls_have_same_origin(original, attempt.url()));
+        if !same_origin {
+            attempt.stop()
+        } else if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+fn urls_have_same_origin(first: &Url, second: &Url) -> bool {
+    first.scheme() == second.scheme()
+        && first.host_str() == second.host_str()
+        && first.port_or_known_default() == second.port_or_known_default()
 }
 
 fn read_bounded_metadata_body(mut reader: impl Read) -> Result<Vec<u8>, JiraClientError> {
@@ -518,6 +556,31 @@ mod tests {
         ] {
             mock.assert_calls(1);
         }
+    }
+
+    #[test]
+    fn json_endpoints_reject_cross_origin_redirects() {
+        let source = MockServer::start();
+        let target = MockServer::start();
+        let redirect = source.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/myself")
+                .header("Authorization", AUTH_HEADER);
+            then.status(302)
+                .header("Location", format!("{}/target", target.base_url()));
+        });
+        let redirected_target = target.mock(|when, then| {
+            when.method(GET).path("/target");
+            then.status(200).json_body(serde_json::json!({
+                "accountId": "should-not-be-read"
+            }));
+        });
+
+        let error = client(&source).myself().unwrap_err();
+
+        redirect.assert_calls(1);
+        redirected_target.assert_calls(0);
+        assert!(matches!(error, JiraClientError::Api { status: 302 }));
     }
 
     #[test]
