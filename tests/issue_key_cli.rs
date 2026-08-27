@@ -1,8 +1,16 @@
 use std::process::{Command, Output};
 
 fn issue_read(value: &str) -> Output {
+    jcli(["issue", "read", value])
+}
+
+fn issue_attachments(value: &str) -> Output {
+    jcli(["issue", "attachments", value])
+}
+
+fn jcli<const N: usize>(args: [&str; N]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_jcli"))
-        .args(["issue", "read", value])
+        .args(args)
         .current_dir(std::env::temp_dir())
         .env("JIRA_BASE_URL", "not a URL")
         .env("JIRA_EMAIL", "unused@example.com")
@@ -35,5 +43,20 @@ fn valid_key_reaches_configuration_loading() {
         String::from_utf8(output.stderr).unwrap(),
         "error: invalid URL in JIRA_BASE_URL: expected an HTTPS URL without embedded credentials\n"
     );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn invalid_attachment_key_fails_before_configuration_loading() {
+    let input = "https://example.atlassian.net/browse/AB-1";
+    let output = issue_attachments(input);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr,
+        "error: invalid Jira issue key: expected PROJECT-NUMBER\n"
+    );
+    assert!(!stderr.contains(input));
     assert!(output.stdout.is_empty());
 }
