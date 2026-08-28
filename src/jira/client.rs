@@ -114,6 +114,17 @@ impl JiraClient {
         self.get_bounded_metadata_json_url(url, "issue")
     }
 
+    /// Returns only the numeric issue ID (for example `"10400"`), which
+    /// Xray's GraphQL API uses to reference an issue. The request asks for
+    /// the harmless `summary` field only, and deserialization keeps just
+    /// the top-level `id`.
+    pub fn issue_id(&self, issue_key: &IssueKey) -> Result<String, JiraClientError> {
+        let mut url = self.endpoint_url(&["rest", "api", "3", "issue", issue_key.as_str()])?;
+        url.query_pairs_mut().append_pair("fields", "summary");
+        let issue: MinimalIssue = self.get_bounded_metadata_json_url(url, "issue")?;
+        Ok(issue.id)
+    }
+
     pub fn attachments(&self, issue_key: &IssueKey) -> Result<Vec<Attachment>, JiraClientError> {
         let mut url = self.endpoint_url(&["rest", "api", "3", "issue", issue_key.as_str()])?;
         url.query_pairs_mut().append_pair("fields", "attachment");
@@ -224,6 +235,12 @@ impl JiraClient {
             .send()
             .map_err(JiraClientError::http)
     }
+}
+
+/// Minimal issue projection for lookups that only need the numeric issue ID.
+#[derive(serde::Deserialize)]
+struct MinimalIssue {
+    id: String,
 }
 
 fn same_origin_redirect_policy() -> Policy {
@@ -358,6 +375,34 @@ mod tests {
             description.content[0].content[0].text.as_deref(),
             Some("Description")
         );
+    }
+
+    #[test]
+    fn issue_id_requests_only_the_summary_field_and_reads_only_the_top_level_id() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/issue/ABC-123")
+                .query_param("fields", "summary")
+                .query_param_count(r".*", r".*", 1)
+                .header("Authorization", AUTH_HEADER);
+            then.status(200).json_body(serde_json::json!({
+                "id": "10400",
+                "key": "ABC-123",
+                "fields": {
+                    "summary": "Whatever",
+                    "status": {"name": "In Progress"},
+                    "description": {"type": "doc", "content": []}
+                }
+            }));
+        });
+
+        let issue_id = client(&server)
+            .issue_id(&"ABC-123".parse().unwrap())
+            .unwrap();
+
+        mock.assert_calls(1);
+        assert_eq!(issue_id, "10400");
     }
 
     #[test]
