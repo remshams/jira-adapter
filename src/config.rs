@@ -13,12 +13,15 @@ use url::Url;
 pub const BASE_URL_VAR: &str = "JIRA_BASE_URL";
 pub const EMAIL_VAR: &str = "JIRA_EMAIL";
 pub const API_TOKEN_VAR: &str = "JIRA_API_TOKEN";
+pub const XRAY_BASE_URL_VAR: &str = "XRAY_BASE_URL";
+pub const XRAY_CLIENT_ID_VAR: &str = "XRAY_CLIENT_ID";
+pub const XRAY_CLIENT_SECRET_VAR: &str = "XRAY_CLIENT_SECRET";
 
 /// Everything jcli needs to authenticate against a Jira Cloud instance:
 /// the instance base URL plus an email and API token for Basic auth.
 ///
-/// The manual `Debug` implementation prints the base URL only; the email
-/// and API token never reach debug output.
+/// The manual `Debug` implementation prints a sanitized base URL only; the
+/// email and API token never reach debug output.
 pub struct Config {
     pub base_url: Url,
     pub email: String,
@@ -28,7 +31,7 @@ pub struct Config {
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
-            .field("base_url", &self.base_url)
+            .field("base_url", &SanitizedUrl(&self.base_url))
             .finish_non_exhaustive()
     }
 }
@@ -72,6 +75,27 @@ impl Lookup {
     }
 }
 
+/// Debug wrapper that renders a URL without its userinfo, query, and
+/// fragment parts, so credentials or tracking data in those parts never
+/// reach debug output. The path stays visible because it is needed to
+/// identify the instance. No validation happens here; the URL is only
+/// re-rendered from its already-parsed parts.
+pub(crate) struct SanitizedUrl<'a>(pub &'a Url);
+
+impl fmt::Debug for SanitizedUrl<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut sanitized = format!("{}://", self.0.scheme());
+        if let Some(host) = self.0.host_str() {
+            sanitized.push_str(host);
+            if let Some(port) = self.0.port() {
+                sanitized.push_str(&format!(":{port}"));
+            }
+        }
+        sanitized.push_str(self.0.path());
+        write!(f, "{sanitized:?}")
+    }
+}
+
 impl Config {
     /// Loads configuration from up to three sources.
     ///
@@ -102,9 +126,60 @@ impl Config {
     ) -> Result<Self, ConfigError> {
         let base_url = resolved(&env, dot_env, file, BASE_URL_VAR)?;
         Ok(Config {
-            base_url: normalize_base_url(&base_url)?,
+            base_url: normalize_base_url(&base_url, BASE_URL_VAR)?,
             email: resolved(&env, dot_env, file, EMAIL_VAR)?,
             api_token: resolved(&env, dot_env, file, API_TOKEN_VAR)?,
+        })
+    }
+}
+
+/// Everything the Xray Cloud client needs: the Xray base URL plus the API
+/// key credentials used to mint a short-lived bearer token.
+///
+/// Loading is optional by design: Jira-only commands never call
+/// [`XrayConfig::load`], so Xray settings are only required when an Xray
+/// command runs.
+///
+/// The manual `Debug` implementation prints a sanitized base URL only; the
+/// client ID and secret never reach debug output.
+pub struct XrayConfig {
+    pub base_url: Url,
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+impl fmt::Debug for XrayConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("XrayConfig")
+            .field("base_url", &SanitizedUrl(&self.base_url))
+            .finish_non_exhaustive()
+    }
+}
+
+impl XrayConfig {
+    /// Loads Xray configuration with the same sources and precedence as
+    /// [`Config::load`]. See there for the exact rules.
+    pub fn load() -> Result<Self, ConfigError> {
+        let dot_env = read_dot_env(Path::new(".env"))?;
+        let file = read_config_file()?;
+        Self::from_sources(
+            |name| Lookup::from_os(env::var_os(name)),
+            dot_env.as_ref(),
+            file.as_ref(),
+        )
+    }
+
+    /// Testable core of `load`, mirroring `Config::from_sources`.
+    fn from_sources(
+        env: impl Fn(&str) -> Lookup,
+        dot_env: Option<&BTreeMap<String, String>>,
+        file: Option<&FileValues>,
+    ) -> Result<Self, ConfigError> {
+        let base_url = resolved(&env, dot_env, file, XRAY_BASE_URL_VAR)?;
+        Ok(XrayConfig {
+            base_url: normalize_base_url(&base_url, XRAY_BASE_URL_VAR)?,
+            client_id: resolved(&env, dot_env, file, XRAY_CLIENT_ID_VAR)?,
+            client_secret: resolved(&env, dot_env, file, XRAY_CLIENT_SECRET_VAR)?,
         })
     }
 }
@@ -146,11 +221,14 @@ fn content_or_empty(value: String, name: &'static str) -> Result<String, ConfigE
 }
 
 /// Flat schema of `config.toml`. Keys are lowercase and optional because the
-/// environment may supply any subset. Unknown keys are rejected so typos
-/// fail loudly instead of silently disabling a setting.
+/// environment may supply any subset; the `xray_*` keys mirror the `XRAY_*`
+/// variables and stay optional so Jira-only setups need no Xray values.
+/// Unknown keys are rejected so typos fail loudly instead of silently
+/// disabling a setting.
 ///
-/// The manual `Debug` implementation prints the base URL only; the email
-/// and API token never reach debug output, even in test assertion
+/// The manual `Debug` implementation prints only which settings are
+/// present; raw URLs (which may carry userinfo, query, or fragment data)
+/// and credentials never reach debug output, even in test assertion
 /// messages.
 #[derive(Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,13 +236,21 @@ struct FileValues {
     base_url: Option<String>,
     email: Option<String>,
     api_token: Option<String>,
+    xray_base_url: Option<String>,
+    xray_client_id: Option<String>,
+    xray_client_secret: Option<String>,
 }
 
 impl fmt::Debug for FileValues {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileValues")
-            .field("base_url", &self.base_url)
-            .finish_non_exhaustive()
+            .field("base_url", &self.base_url.is_some())
+            .field("email", &self.email.is_some())
+            .field("api_token", &self.api_token.is_some())
+            .field("xray_base_url", &self.xray_base_url.is_some())
+            .field("xray_client_id", &self.xray_client_id.is_some())
+            .field("xray_client_secret", &self.xray_client_secret.is_some())
+            .finish()
     }
 }
 
@@ -174,6 +260,9 @@ impl FileValues {
             BASE_URL_VAR => self.base_url.as_deref(),
             EMAIL_VAR => self.email.as_deref(),
             API_TOKEN_VAR => self.api_token.as_deref(),
+            XRAY_BASE_URL_VAR => self.xray_base_url.as_deref(),
+            XRAY_CLIENT_ID_VAR => self.xray_client_id.as_deref(),
+            XRAY_CLIENT_SECRET_VAR => self.xray_client_secret.as_deref(),
             _ => None,
         }
     }
@@ -262,8 +351,8 @@ fn has_content(value: &str) -> bool {
 /// Ensures the base URL ends in `/` so that `Url::join` with a relative API
 /// path appends to the path instead of replacing its last segment:
 /// `https://x/browse` + `rest/...` would otherwise lose `/browse`.
-fn normalize_base_url(raw: &str) -> Result<Url, ConfigError> {
-    let mut url = Url::parse(raw).map_err(|_| ConfigError::InvalidBaseUrl(BASE_URL_VAR))?;
+fn normalize_base_url(raw: &str, name: &'static str) -> Result<Url, ConfigError> {
+    let mut url = Url::parse(raw).map_err(|_| ConfigError::InvalidBaseUrl(name))?;
     if !url.path().ends_with('/') {
         url.set_path(&format!("{}/", url.path()));
     }
@@ -761,5 +850,184 @@ mod tests {
         assert!(!message.contains(secret));
         assert!(!message.contains(dir.path().to_string_lossy().as_ref()));
         assert!(!message.contains("expected"));
+    }
+
+    const XRAY_ALL: &[(&str, &str)] = &[
+        (XRAY_BASE_URL_VAR, "https://xray.example.com"),
+        (XRAY_CLIENT_ID_VAR, "xray-client"),
+        (XRAY_CLIENT_SECRET_VAR, "xray-secret"),
+    ];
+
+    const FULL_XRAY_FILE: &str = "xray_base_url = \"https://file-xray.example.com\"\n\
+                                  xray_client_id = \"file-client\"\n\
+                                  xray_client_secret = \"file-xray-secret\"\n";
+
+    #[test]
+    fn loads_all_three_xray_variables() {
+        let config = XrayConfig::from_sources(vars(XRAY_ALL), None, None).unwrap();
+        assert_eq!(config.base_url.as_str(), "https://xray.example.com/");
+        assert_eq!(config.client_id, "xray-client");
+        assert_eq!(config.client_secret, "xray-secret");
+    }
+
+    #[test]
+    fn a_path_prefixed_xray_base_url_keeps_its_prefix_and_gains_a_trailing_slash() {
+        let mut all = XRAY_ALL.to_vec();
+        all[0] = (XRAY_BASE_URL_VAR, "https://example.com/xray");
+        let config = XrayConfig::from_sources(vars(&all), None, None).unwrap();
+        assert_eq!(config.base_url.as_str(), "https://example.com/xray/");
+    }
+
+    #[test]
+    fn a_missing_xray_variable_names_the_variable() {
+        let err = XrayConfig::from_sources(vars(&XRAY_ALL[1..]), None, None).unwrap_err();
+        assert_eq!(err, ConfigError::Missing(XRAY_BASE_URL_VAR));
+
+        let without_secret = &XRAY_ALL[..2];
+        let err = XrayConfig::from_sources(vars(without_secret), None, None).unwrap_err();
+        assert_eq!(err, ConfigError::Missing(XRAY_CLIENT_SECRET_VAR));
+        assert_eq!(
+            err.to_string(),
+            "missing configuration value XRAY_CLIENT_SECRET"
+        );
+    }
+
+    #[test]
+    fn xray_environment_values_override_dot_env_and_the_file() {
+        let file = file_values(FULL_XRAY_FILE);
+        let dot_env = dot_env_values(&[
+            (XRAY_BASE_URL_VAR, "https://dotenv-xray.example.com"),
+            (XRAY_CLIENT_ID_VAR, "dotenv-client"),
+            (XRAY_CLIENT_SECRET_VAR, "dotenv-xray-secret"),
+        ]);
+
+        let config = XrayConfig::from_sources(vars(XRAY_ALL), Some(&dot_env), Some(&file)).unwrap();
+        assert_eq!(config.base_url.as_str(), "https://xray.example.com/");
+        assert_eq!(config.client_id, "xray-client");
+        assert_eq!(config.client_secret, "xray-secret");
+    }
+
+    #[test]
+    fn the_file_supplies_xray_values_when_no_higher_source_has_them() {
+        let file = file_values(FULL_XRAY_FILE);
+        let config = XrayConfig::from_sources(absent, None, Some(&file)).unwrap();
+        assert_eq!(config.base_url.as_str(), "https://file-xray.example.com/");
+        assert_eq!(config.client_id, "file-client");
+        assert_eq!(config.client_secret, "file-xray-secret");
+    }
+
+    #[test]
+    fn a_blank_xray_value_is_authoritative_and_never_falls_through() {
+        let file = file_values(FULL_XRAY_FILE);
+        let all = [
+            (XRAY_BASE_URL_VAR, "https://xray.example.com"),
+            (XRAY_CLIENT_ID_VAR, "client"),
+            (XRAY_CLIENT_SECRET_VAR, "   "),
+        ];
+
+        assert_eq!(
+            XrayConfig::from_sources(vars(&all), None, Some(&file)).unwrap_err(),
+            ConfigError::Empty(XRAY_CLIENT_SECRET_VAR)
+        );
+    }
+
+    #[test]
+    fn jira_and_xray_values_can_live_in_one_file() {
+        let file = file_values(&format!("{FULL_FILE}{FULL_XRAY_FILE}"));
+        assert_eq!(file.base_url.as_deref(), Some("https://file.example.com"));
+        assert_eq!(
+            file.xray_base_url.as_deref(),
+            Some("https://file-xray.example.com")
+        );
+        assert_eq!(file.xray_client_secret.as_deref(), Some("file-xray-secret"));
+
+        let mut all = ALL.to_vec();
+        all.extend_from_slice(XRAY_ALL);
+        let config = Config::from_sources(vars(&all), None, Some(&file)).unwrap();
+        let xray = XrayConfig::from_sources(vars(&all), None, Some(&file)).unwrap();
+        assert_eq!(config.email, "jane@example.com");
+        assert_eq!(xray.client_id, "xray-client");
+    }
+
+    #[test]
+    fn xray_debug_output_never_contains_secrets() {
+        let config = XrayConfig::from_sources(vars(XRAY_ALL), None, None).unwrap();
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("base_url"));
+        assert!(!rendered.contains("xray-client"));
+        assert!(!rendered.contains("xray-secret"));
+
+        let file = file_values(FULL_XRAY_FILE);
+        let rendered = format!("{file:?}");
+        assert!(!rendered.contains("file-client"));
+        assert!(!rendered.contains("file-xray-secret"));
+    }
+
+    #[test]
+    fn config_debug_output_hides_url_userinfo_query_and_fragment() {
+        let config = Config {
+            base_url: Url::parse("https://user:pass@example.com/jira/?unsafe=1#fragment").unwrap(),
+            email: "jane@example.com".to_owned(),
+            api_token: "secret-token".to_owned(),
+        };
+
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("https://example.com/jira/"));
+        assert!(!rendered.contains("user:pass"));
+        assert!(!rendered.contains("unsafe=1"));
+        assert!(!rendered.contains("#fragment"));
+        assert!(!rendered.contains("secret-token"));
+    }
+
+    #[test]
+    fn xray_config_debug_output_hides_url_userinfo_query_and_fragment() {
+        let config = XrayConfig {
+            base_url: Url::parse("https://user:pass@example.com/xray/?unsafe=1#fragment").unwrap(),
+            client_id: "client".to_owned(),
+            client_secret: "secret".to_owned(),
+        };
+
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("https://example.com/xray/"));
+        assert!(!rendered.contains("user:pass"));
+        assert!(!rendered.contains("unsafe=1"));
+        assert!(!rendered.contains("#fragment"));
+        assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn file_values_debug_exposes_no_raw_urls_or_credentials() {
+        let file = file_values(&format!("{FULL_FILE}{FULL_XRAY_FILE}"));
+
+        let rendered = format!("{file:?}");
+
+        assert!(!rendered.contains("https://"));
+        assert!(!rendered.contains("file.example.com"));
+        assert!(!rendered.contains("file@example.com"));
+        assert!(!rendered.contains("file-token"));
+        assert!(!rendered.contains("file-client"));
+        assert!(!rendered.contains("file-xray-secret"));
+        // Presence is still visible for debugging.
+        assert!(rendered.contains("true"));
+    }
+
+    #[test]
+    fn an_invalid_xray_base_url_names_the_xray_variable() {
+        let all = [
+            (XRAY_BASE_URL_VAR, "not a url"),
+            (XRAY_CLIENT_ID_VAR, "client"),
+            (XRAY_CLIENT_SECRET_VAR, "secret"),
+        ];
+
+        assert_eq!(
+            XrayConfig::from_sources(vars(&all), None, None).unwrap_err(),
+            ConfigError::InvalidBaseUrl(XRAY_BASE_URL_VAR)
+        );
+        assert_eq!(
+            ConfigError::InvalidBaseUrl(XRAY_BASE_URL_VAR).to_string(),
+            "invalid URL in XRAY_BASE_URL"
+        );
     }
 }
