@@ -7,7 +7,7 @@ use crate::config;
 use crate::issue_key::IssueKey;
 use crate::jira::client::JiraClient;
 use crate::xray::client::XrayClient;
-use crate::xray::test_runs::TestRunsOutput;
+use crate::xray::test_runs::{TestRunSortDirection, TestRunSortField, TestRunsOutput, sort_page};
 
 pub(crate) fn read_issue(value: &str) -> ! {
     let issue_key = parse_issue_key(value);
@@ -50,7 +50,12 @@ pub(crate) fn download_attachments(value: &str, output_directory: Option<PathBuf
     write_stdout(&manifest.stdout(&issue_key));
 }
 
-pub(crate) fn xray_test_runs(value: &str) -> ! {
+pub(crate) fn xray_test_runs(
+    value: &str,
+    statuses: Vec<String>,
+    sort: Option<TestRunSortField>,
+    direction: Option<TestRunSortDirection>,
+) -> ! {
     let issue_key = parse_issue_key(value);
     // Both configuration sets are loaded before any request so a missing
     // setting fails without touching the network.
@@ -71,10 +76,21 @@ pub(crate) fn xray_test_runs(value: &str) -> ! {
         Ok(client) => client,
         Err(error) => exit(3, error),
     };
-    let page = match xray_client.test_runs(&issue_id) {
+    let statuses = if statuses.is_empty() {
+        None
+    } else {
+        Some(statuses.as_slice())
+    };
+    let mut page = match xray_client.test_runs(&issue_id, statuses) {
         Ok(page) => page,
         Err(error) => exit(3, error),
     };
+    if let Some(field) = sort {
+        // A sort without an explicit direction defaults to desc. Sorting
+        // applies only to the returned page, never to the full history.
+        let direction = direction.unwrap_or(TestRunSortDirection::Desc);
+        sort_page(&mut page, field, direction);
+    }
     write_stdout(&TestRunsOutput::from_page(issue_key.as_str(), &page).to_pretty_json());
 }
 

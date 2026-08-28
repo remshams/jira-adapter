@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::xray::test_runs::{TestRunSortDirection, TestRunSortField};
+
 #[derive(Parser)]
 #[command(name = "jcli", version, about = "Read-only Jira Cloud CLI")]
 struct Cli {
@@ -59,6 +61,16 @@ enum XrayCommand {
         /// Emit JSON output (required in this version)
         #[arg(long, required = true)]
         json: bool,
+        /// Xray run status to keep, e.g. PASSED or a custom status ID.
+        /// Repeat for several values; omit to keep every status.
+        #[arg(long = "status", value_name = "STATUS")]
+        statuses: Vec<String>,
+        /// Sort the returned page (not the full history) by this field
+        #[arg(long, value_enum, value_name = "FIELD")]
+        sort: Option<TestRunSortField>,
+        /// Sort order for --sort; defaults to desc
+        #[arg(long, value_enum, requires = "sort", value_name = "DIRECTION")]
+        direction: Option<TestRunSortDirection>,
     },
 }
 
@@ -71,7 +83,13 @@ fn main() {
             IssueCommand::Attachments { issue, out } => commands::download_attachments(&issue, out),
         },
         Command::Xray { command } => match command {
-            XrayCommand::TestRuns { issue, json: _ } => commands::xray_test_runs(&issue),
+            XrayCommand::TestRuns {
+                issue,
+                json: _,
+                statuses,
+                sort,
+                direction,
+            } => commands::xray_test_runs(&issue, statuses, sort, direction),
         },
         Command::Whoami => commands::whoami(),
     }

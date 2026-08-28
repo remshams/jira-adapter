@@ -1,4 +1,9 @@
+use std::cmp::Ordering;
+
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 /// Envelope of Xray's GraphQL endpoint. `errors` may be present even though
 /// the HTTP status is 200, so it is checked before the data is used. The
@@ -60,6 +65,111 @@ pub struct TestRunStatus {
 #[serde(rename_all = "camelCase")]
 pub struct TestExecutionRef {
     pub issue_id: Option<String>,
+}
+
+/// Field that can order the returned page. Clap renders variant names as
+/// kebab-case values, so this is `--sort started-on`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TestRunSortField {
+    /// The instant the run was started
+    StartedOn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TestRunSortDirection {
+    /// Oldest first
+    Asc,
+    /// Newest first
+    Desc,
+}
+
+/// Sorts the returned page in place by the requested field. Xray makes no
+/// ordering promise for the page, so this only reorders what the server
+/// already returned; it can never surface runs outside the fixed first
+/// page. Valid `startedOn` timestamps sort first, ordered by instant
+/// (oldest first for asc, newest first for desc), then runs with a missing
+/// or unparseable timestamp, then null entries. Equal instants break ties
+/// by run ID (null IDs last) and finally by original position, so the
+/// result is deterministic in both directions.
+pub(crate) fn sort_page(
+    page: &mut TestRunPage,
+    field: TestRunSortField,
+    direction: TestRunSortDirection,
+) {
+    let ascending = matches!(direction, TestRunSortDirection::Asc);
+    let Some(results) = page.results.as_mut() else {
+        return;
+    };
+    let mut entries: Vec<(usize, SortKey, Option<TestRun>)> = results
+        .drain(..)
+        .enumerate()
+        .map(|(position, run)| {
+            let key = sort_key(&run, field);
+            (position, key, run)
+        })
+        .collect();
+    entries.sort_by(|(position_a, key_a, run_a), (position_b, key_b, run_b)| {
+        compare_keys(key_a, key_b, ascending)
+            .then_with(|| compare_ids(run_a, run_b))
+            .then_with(|| position_a.cmp(position_b))
+    });
+    results.extend(entries.into_iter().map(|(_, _, run)| run));
+}
+
+/// Sort classes. `Unparseable` covers both a missing and an invalid
+/// timestamp; both lose to any parseable instant regardless of direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SortKey {
+    Instant(OffsetDateTime),
+    Unparseable,
+    Null,
+}
+
+fn sort_key(entry: &Option<TestRun>, field: TestRunSortField) -> SortKey {
+    let Some(run) = entry else {
+        return SortKey::Null;
+    };
+    match field {
+        TestRunSortField::StartedOn => match run.started_on.as_deref() {
+            Some(raw) => {
+                OffsetDateTime::parse(raw, &Rfc3339).map_or(SortKey::Unparseable, SortKey::Instant)
+            }
+            None => SortKey::Unparseable,
+        },
+    }
+}
+
+fn compare_keys(a: &SortKey, b: &SortKey, ascending: bool) -> Ordering {
+    match (a, b) {
+        (SortKey::Null, SortKey::Null) => Ordering::Equal,
+        (SortKey::Null, _) => Ordering::Greater,
+        (_, SortKey::Null) => Ordering::Less,
+        (SortKey::Unparseable, SortKey::Unparseable) => Ordering::Equal,
+        (SortKey::Unparseable, SortKey::Instant(_)) => Ordering::Greater,
+        (SortKey::Instant(_), SortKey::Unparseable) => Ordering::Less,
+        (SortKey::Instant(a), SortKey::Instant(b)) => {
+            // OffsetDateTime orders by instant, so runs compare correctly
+            // across UTC offsets.
+            let ordering = a.cmp(b);
+            if ascending {
+                ordering
+            } else {
+                ordering.reverse()
+            }
+        }
+    }
+}
+
+fn compare_ids(a: &Option<TestRun>, b: &Option<TestRun>) -> Ordering {
+    let a_id = a.as_ref().and_then(|run| run.id.as_deref());
+    let b_id = b.as_ref().and_then(|run| run.id.as_deref());
+    // Null IDs sort after present IDs, independent of the direction.
+    match (a_id, b_id) {
+        (Some(a), Some(b)) => a.cmp(b),
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+    }
 }
 
 /// Stable JSON output of `jcli xray test-runs`. Nullable values stay null
@@ -397,5 +507,167 @@ mod tests {
             parsed.runs[0].as_ref().unwrap().status.as_deref(),
             Some(status_with_c1.as_str())
         );
+    }
+
+    fn run_at(id: &str, started_on: Option<&str>) -> Option<TestRun> {
+        Some(TestRun {
+            id: Some(id.to_owned()),
+            status: None,
+            started_on: started_on.map(str::to_owned),
+            finished_on: None,
+            test_execution: None,
+        })
+    }
+
+    fn sorted_ids(results: &[Option<TestRun>]) -> Vec<Option<&str>> {
+        results
+            .iter()
+            .map(|run| run.as_ref().and_then(|run| run.id.as_deref()))
+            .collect()
+    }
+
+    // run-a and run-b name the same instant through different offsets;
+    // run-c is older, run-d has a garbage timestamp, run-e has none.
+    fn offset_page_input() -> Vec<Option<TestRun>> {
+        vec![
+            run_at("run-b", Some("2024-05-02T09:00:00+01:00")),
+            run_at("run-d", Some("not-a-timestamp")),
+            run_at("run-a", Some("2024-05-02T10:00:00+02:00")),
+            run_at("run-e", None),
+            run_at("run-c", Some("2024-05-01T12:00:00Z")),
+        ]
+    }
+
+    #[test]
+    fn sorting_compares_instants_across_utc_offsets() {
+        let mut page = page_with(Some(5), Some(offset_page_input()));
+
+        sort_page(
+            &mut page,
+            TestRunSortField::StartedOn,
+            TestRunSortDirection::Asc,
+        );
+
+        assert_eq!(
+            sorted_ids(page.results.as_ref().unwrap()),
+            [
+                Some("run-c"),
+                Some("run-a"),
+                Some("run-b"),
+                Some("run-d"),
+                Some("run-e")
+            ]
+        );
+    }
+
+    #[test]
+    fn desc_reverses_instants_but_keeps_invalid_and_null_last() {
+        let mut page = page_with(Some(5), Some(offset_page_input()));
+
+        sort_page(
+            &mut page,
+            TestRunSortField::StartedOn,
+            TestRunSortDirection::Desc,
+        );
+
+        assert_eq!(
+            sorted_ids(page.results.as_ref().unwrap()),
+            [
+                Some("run-a"),
+                Some("run-b"),
+                Some("run-c"),
+                Some("run-d"),
+                Some("run-e")
+            ]
+        );
+    }
+
+    #[test]
+    fn null_entries_sort_after_every_non_null_entry() {
+        let mut page = page_with(
+            Some(3),
+            Some(vec![
+                None,
+                run_at("run-1", Some("2024-05-01T12:00:00Z")),
+                run_at("run-2", Some("not-a-timestamp")),
+            ]),
+        );
+
+        sort_page(
+            &mut page,
+            TestRunSortField::StartedOn,
+            TestRunSortDirection::Asc,
+        );
+
+        assert_eq!(
+            sorted_ids(page.results.as_ref().unwrap()),
+            [Some("run-1"), Some("run-2"), None]
+        );
+    }
+
+    #[test]
+    fn equal_instants_break_ties_by_id_then_original_position() {
+        // All three runs name the same instant; run-d has a null ID.
+        let mut page = page_with(
+            Some(4),
+            Some(vec![
+                run_at("run-b", Some("2024-05-01T12:00:00Z")),
+                run_at("run-a", Some("2024-05-01T14:00:00+02:00")),
+                run_at("run-a", Some("2024-05-01T10:00:00-02:00")),
+                Some(TestRun {
+                    id: None,
+                    status: None,
+                    started_on: Some("2024-05-01T12:00:00Z".to_owned()),
+                    finished_on: None,
+                    test_execution: None,
+                }),
+            ]),
+        );
+
+        sort_page(
+            &mut page,
+            TestRunSortField::StartedOn,
+            TestRunSortDirection::Asc,
+        );
+
+        // Equal IDs keep their original relative order; the null ID lands
+        // last without changing the direction.
+        assert_eq!(
+            sorted_ids(page.results.as_ref().unwrap()),
+            [Some("run-a"), Some("run-a"), Some("run-b"), None]
+        );
+    }
+
+    #[test]
+    fn sorting_leaves_page_numbers_and_metadata_untouched() {
+        let mut page = page_with(
+            Some(7),
+            Some(vec![run_at("run-1", Some("2024-05-01T12:00:00Z"))]),
+        );
+        page.start = Some(20);
+        page.limit = Some(100);
+
+        sort_page(
+            &mut page,
+            TestRunSortField::StartedOn,
+            TestRunSortDirection::Desc,
+        );
+
+        assert_eq!(page.total, Some(7));
+        assert_eq!(page.start, Some(20));
+        assert_eq!(page.limit, Some(100));
+    }
+
+    #[test]
+    fn a_null_results_list_is_left_alone_by_sorting() {
+        let mut page = page_with(Some(0), None);
+
+        sort_page(
+            &mut page,
+            TestRunSortField::StartedOn,
+            TestRunSortDirection::Asc,
+        );
+
+        assert!(page.results.is_none());
     }
 }

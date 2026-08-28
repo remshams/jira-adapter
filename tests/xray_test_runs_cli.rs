@@ -19,7 +19,20 @@ fn xray_env(server: &MockServer) -> Vec<(&'static str, String)> {
 }
 
 fn run(server: &MockServer, extra_env: &[(&str, String)]) -> std::process::Output {
-    let args: Vec<&str> = vec!["xray", "test-runs", "TEST-123", "--json"];
+    run_args(
+        server,
+        &["xray", "test-runs", "TEST-123", "--json"],
+        extra_env,
+    )
+}
+
+/// Runs `jcli` with the full standard environment and extra CLI arguments.
+fn run_args(
+    server: &MockServer,
+    args: &[&str],
+    extra_env: &[(&str, String)],
+) -> std::process::Output {
+    let args: Vec<&str> = args.to_vec();
     let mut env: Vec<(&str, String)> = vec![
         ("JIRA_BASE_URL", server.base_url()),
         ("JIRA_EMAIL", "cli@example.com".to_owned()),
@@ -62,13 +75,29 @@ fn mock_auth(server: &MockServer) -> httpmock::Mock<'_> {
 }
 
 fn mock_graphql(server: &MockServer, body: serde_json::Value) -> httpmock::Mock<'_> {
+    mock_graphql_with_statuses(server, body, None)
+}
+
+/// Mocks a GraphQL request that must carry the given statuses in the
+/// `variables` object, in this exact order and spelling. `None` pins the
+/// absent case as JSON null.
+fn mock_graphql_with_statuses<'a>(
+    server: &'a MockServer,
+    body: serde_json::Value,
+    statuses: Option<&'a [&'a str]>,
+) -> httpmock::Mock<'a> {
+    let statuses_json = statuses.map_or_else(
+        || "null".to_owned(),
+        |statuses| serde_json::to_string(statuses).unwrap(),
+    );
+    let variables = format!(
+        r#"{{"variables": {{"testIssueIds": ["10400"], "limit": 100, "start": 0, "statuses": {statuses_json}}}}}"#
+    );
     server.mock(|when, then| {
         when.method(POST)
             .path("/api/v2/graphql")
             .header("Authorization", format!("Bearer {XRAY_TOKEN}"))
-            .json_body_includes(
-                r#"{"variables": {"testIssueIds": ["10400"], "limit": 100, "start": 0}}"#,
-            )
+            .json_body_includes(variables.as_str())
             .body_includes("getTestRuns");
         then.status(200).json_body(body);
     })
@@ -89,6 +118,42 @@ fn page_body(total: i64, result_count: usize) -> serde_json::Value {
             })).collect::<Vec<_>>()
         }}
     })
+}
+
+fn run_entry(id: &str, started_on: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "status": {"name": "PASSED"},
+        "startedOn": started_on,
+        "finishedOn": serde_json::Value::Null,
+        "testExecution": serde_json::Value::Null
+    })
+}
+
+fn results_page(results: serde_json::Value) -> serde_json::Value {
+    let total = results.as_array().map_or(0, Vec::len) as i64;
+    serde_json::json!({"data": {"getTestRuns": {
+        "total": total,
+        "start": 0,
+        "limit": 100,
+        "results": results
+    }}})
+}
+
+fn output_ids(stdout: &str) -> Vec<Option<String>> {
+    let value: Value = serde_json::from_str(stdout).unwrap();
+    value["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|run| {
+            if run.is_null() {
+                None
+            } else {
+                run["id"].as_str().map(str::to_owned)
+            }
+        })
+        .collect()
 }
 
 #[test]
@@ -386,4 +451,264 @@ fn secrets_never_reach_stdout_or_stderr_on_the_happy_path() {
         assert!(!stdout.contains(secret), "stdout leaked {secret}");
         assert!(!stderr.contains(secret), "stderr leaked {secret}");
     }
+}
+
+#[test]
+fn repeated_status_flags_are_forwarded_unchanged_and_in_order() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let _auth = mock_auth(&server);
+    let _graphql =
+        mock_graphql_with_statuses(&server, page_body(2, 2), Some(&["FAILED", "CUSTOM-42"]));
+
+    let output = run_args(
+        &server,
+        &[
+            "xray",
+            "test-runs",
+            "TEST-123",
+            "--json",
+            "--status",
+            "FAILED",
+            "--status",
+            "CUSTOM-42",
+        ],
+        &[],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    _jira_issue.assert_calls(1);
+    _auth.assert_calls(1);
+    _graphql.assert_calls(1);
+    let value: Value = serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(value["runs"][0]["status"], "PASSED");
+    assert_eq!(value["returned"], 2);
+}
+
+#[test]
+fn a_single_status_flag_is_forwarded_as_one_value() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let _auth = mock_auth(&server);
+    let _graphql = mock_graphql_with_statuses(&server, page_body(1, 1), Some(&["PASSED"]));
+
+    let output = run_args(
+        &server,
+        &[
+            "xray",
+            "test-runs",
+            "TEST-123",
+            "--json",
+            "--status",
+            "PASSED",
+        ],
+        &[],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    _graphql.assert_calls(1);
+}
+
+#[test]
+fn without_sorting_the_server_order_is_kept() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let _auth = mock_auth(&server);
+    let _graphql = mock_graphql(
+        &server,
+        results_page(serde_json::json!([
+            run_entry("run-c", "2024-05-01T12:00:00Z".into()),
+            serde_json::Value::Null,
+            run_entry("run-a", "2024-05-02T10:00:00+02:00".into())
+        ])),
+    );
+
+    let output = run(&server, &[]);
+
+    assert_eq!(output.status.code(), Some(0));
+    _jira_issue.assert_calls(1);
+    _auth.assert_calls(1);
+    _graphql.assert_calls(1);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        output_ids(&stdout),
+        [Some("run-c".to_owned()), None, Some("run-a".to_owned())]
+    );
+}
+
+#[test]
+fn sort_defaults_to_desc_and_compares_instants_across_offsets() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let _auth = mock_auth(&server);
+    // run-a and run-b name the same instant through different offsets; run-c
+    // is older, run-d has a garbage timestamp, run-e has none, and the last
+    // entry is null.
+    let _graphql = mock_graphql(
+        &server,
+        results_page(serde_json::json!([
+            run_entry("run-a", "2024-05-02T10:00:00+02:00".into()),
+            run_entry("run-d", "not-a-timestamp".into()),
+            run_entry("run-c", "2024-05-01T12:00:00Z".into()),
+            run_entry("run-e", serde_json::Value::Null),
+            run_entry("run-b", "2024-05-02T09:00:00+01:00".into()),
+            serde_json::Value::Null
+        ])),
+    );
+
+    let output = run_args(
+        &server,
+        &[
+            "xray",
+            "test-runs",
+            "TEST-123",
+            "--json",
+            "--sort",
+            "started-on",
+        ],
+        &[],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    _jira_issue.assert_calls(1);
+    _auth.assert_calls(1);
+    _graphql.assert_calls(1);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // Newest first, ties broken deterministically by run ID, invalid and
+    // missing timestamps then null entries last.
+    assert_eq!(
+        output_ids(&stdout),
+        [
+            Some("run-a".to_owned()),
+            Some("run-b".to_owned()),
+            Some("run-c".to_owned()),
+            Some("run-d".to_owned()),
+            Some("run-e".to_owned()),
+            None
+        ]
+    );
+    let value: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["total"], 6);
+    assert_eq!(value["returned"], 6);
+    assert_eq!(value["truncated"], false);
+    assert_eq!(value["start"], 0);
+    assert_eq!(value["limit"], 100);
+    assert_eq!(value["runs"][3]["startedOn"], "not-a-timestamp");
+    assert_eq!(value["runs"][4]["startedOn"], Value::Null);
+    assert_eq!(value["runs"][3]["status"], "PASSED");
+}
+
+#[test]
+fn explicit_asc_sorts_oldest_first_with_the_same_ties_and_tails() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let _auth = mock_auth(&server);
+    let _graphql = mock_graphql(
+        &server,
+        results_page(serde_json::json!([
+            run_entry("run-a", "2024-05-02T10:00:00+02:00".into()),
+            run_entry("run-d", "not-a-timestamp".into()),
+            run_entry("run-c", "2024-05-01T12:00:00Z".into()),
+            run_entry("run-e", serde_json::Value::Null),
+            run_entry("run-b", "2024-05-02T09:00:00+01:00".into()),
+            serde_json::Value::Null
+        ])),
+    );
+
+    let output = run_args(
+        &server,
+        &[
+            "xray",
+            "test-runs",
+            "TEST-123",
+            "--json",
+            "--sort",
+            "started-on",
+            "--direction",
+            "asc",
+        ],
+        &[],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    _jira_issue.assert_calls(1);
+    _auth.assert_calls(1);
+    _graphql.assert_calls(1);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        output_ids(&stdout),
+        [
+            Some("run-c".to_owned()),
+            Some("run-a".to_owned()),
+            Some("run-b".to_owned()),
+            Some("run-d".to_owned()),
+            Some("run-e".to_owned()),
+            None
+        ]
+    );
+}
+
+#[test]
+fn direction_requires_sort_before_configuration_or_network() {
+    let server = MockServer::start();
+    let anything = server.mock(|when, then| {
+        when.method(GET);
+        then.status(200);
+    });
+    let anything_post = server.mock(|when, then| {
+        when.method(POST);
+        then.status(200);
+    });
+
+    // No environment at all: clap must reject the flag combination before
+    // any configuration is read or request is sent.
+    let output = jcli(
+        &[
+            "xray",
+            "test-runs",
+            "TEST-123",
+            "--json",
+            "--direction",
+            "desc",
+        ],
+        &[],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--sort"), "stderr: {stderr}");
+    anything.assert_calls(0);
+    anything_post.assert_calls(0);
+}
+
+#[test]
+fn an_unknown_sort_field_is_rejected_by_clap() {
+    let server = MockServer::start();
+    let anything = server.mock(|when, then| {
+        when.method(GET);
+        then.status(200);
+    });
+
+    let output = jcli(
+        &[
+            "xray",
+            "test-runs",
+            "TEST-123",
+            "--json",
+            "--sort",
+            "finished-on",
+        ],
+        &[
+            ("JIRA_BASE_URL", server.base_url().as_str()),
+            ("JIRA_EMAIL", "cli@example.com"),
+            ("JIRA_API_TOKEN", "cli-test-token"),
+            ("XRAY_BASE_URL", server.base_url().as_str()),
+            ("XRAY_CLIENT_ID", XRAY_CLIENT_ID),
+            ("XRAY_CLIENT_SECRET", XRAY_CLIENT_SECRET),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    anything.assert_calls(0);
 }
