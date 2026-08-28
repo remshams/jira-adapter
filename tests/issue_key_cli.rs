@@ -9,9 +9,15 @@ fn issue_attachments(value: &str) -> Output {
 }
 
 fn jcli<const N: usize>(args: [&str; N]) -> Output {
+    // A unique working directory plus a cleared environment keep the
+    // child process away from the host's HOME, XDG_CONFIG_HOME, and any
+    // stray .env, so these tests exercise configuration loading in
+    // isolation.
+    let dir = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_jcli"))
         .args(args)
-        .current_dir(std::env::temp_dir())
+        .current_dir(dir.path())
+        .env_clear()
         .env("JIRA_BASE_URL", "not a URL")
         .env("JIRA_EMAIL", "unused@example.com")
         .env("JIRA_API_TOKEN", "unused-token")

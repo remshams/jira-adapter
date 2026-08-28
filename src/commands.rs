@@ -73,9 +73,11 @@ fn parse_issue_key(value: &str) -> IssueKey {
 }
 
 fn load_config() -> config::Config {
-    // Load .env only after command arguments that guard configuration access
-    // have been validated. Real environment variables still take precedence.
-    let _ = dotenvy::dotenv();
+    // Load configuration only after command arguments that guard
+    // configuration access have been validated. Config::load parses the
+    // exact `.env` in the working directory itself, without mutating the
+    // process environment, so each setting keeps its source and the
+    // per-user TOML file cannot mix with project-local values.
     match config::Config::load() {
         Ok(config) => config,
         Err(error) => exit(2, error),

@@ -20,9 +20,13 @@ fn whoami_sanitizes_jira_account_fields() {
         }));
     });
 
+    // A unique working directory keeps the child process away from any
+    // stray .env in the shared temp directory; env_clear already isolates
+    // it from HOME and XDG_CONFIG_HOME.
+    let dir = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_jcli"))
         .arg("whoami")
-        .current_dir(std::env::temp_dir())
+        .current_dir(dir.path())
         .env_clear()
         .env("JIRA_BASE_URL", server.base_url())
         .env("JCLI_ALLOW_INSECURE_HTTP", "1")
