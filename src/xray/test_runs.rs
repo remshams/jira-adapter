@@ -87,9 +87,8 @@ pub struct TestRunOutput {
     pub test_execution_issue_id: Option<String>,
 }
 
-/// Bidi formatting code points that can spoof terminal output. serde_json
-/// already escapes control characters; these stay literal unless they are
-/// escaped here during rendering.
+/// Bidi formatting code points that can spoof terminal output. They are
+/// not control characters, so serde_json leaves them literal.
 const BIDI_CODE_POINTS: &[char] = &[
     '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
     '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
@@ -131,14 +130,17 @@ impl TestRunsOutput {
     }
 
     /// Renders the output as stable pretty JSON with one trailing newline.
-    /// Bidi formatting code points are escaped as literal `\uXXXX` text so
-    /// the terminal never interprets them; parsing the output recovers the
-    /// original value.
+    /// serde_json escapes C0 controls below U+0020 but leaves DEL and the
+    /// C1 range (for example U+009B CSI and U+009D OSC) literal; those never
+    /// occur as JSON structure, so escaping them cannot break the document.
+    /// Bidi formatting code points are escaped the same way. Parsing the
+    /// output recovers the original value.
     pub fn to_pretty_json(&self) -> String {
         let json = serde_json::to_string_pretty(self).expect("output should serialize");
         let mut rendered = String::with_capacity(json.len());
         for character in json.chars() {
-            if BIDI_CODE_POINTS.contains(&character) {
+            let is_c1_or_del = ('\u{7F}'..='\u{9F}').contains(&character);
+            if is_c1_or_del || BIDI_CODE_POINTS.contains(&character) {
                 rendered.push_str(&format!("\\u{:04X}", character as u32));
             } else {
                 rendered.push(character);
@@ -354,6 +356,46 @@ mod tests {
         assert_eq!(
             parsed.runs[0].as_ref().unwrap().status.as_deref(),
             Some(status_with_bidi.as_str())
+        );
+    }
+
+    #[test]
+    fn pretty_json_escapes_c1_and_del_control_characters() {
+        // serde_json only escapes C0 controls below U+0020; C1 codes such as
+        // U+009B (CSI) and U+009D (OSC) plus DEL would otherwise reach the
+        // terminal as raw bytes.
+        let status_with_c1 = "PASSED\u{009B}4m\u{009D}\u{009C}\u{007F}".to_owned();
+        let output = TestRunsOutput::from_page(
+            "TEST-123",
+            &page_with(
+                Some(1),
+                Some(vec![Some(TestRun {
+                    id: Some("0".to_owned()),
+                    status: Some(TestRunStatus {
+                        name: Some(status_with_c1.clone()),
+                    }),
+                    started_on: None,
+                    finished_on: None,
+                    test_execution: None,
+                })]),
+            ),
+        );
+
+        let json = output.to_pretty_json();
+
+        for control in ['\u{009B}', '\u{009D}', '\u{009C}', '\u{007F}'] {
+            assert!(!json.contains(control), "raw control {control:?} leaked");
+        }
+        assert!(json.contains("\\u009B"));
+        assert!(json.contains("\\u009D"));
+        assert!(json.contains("\\u009C"));
+        assert!(json.contains("\\u007F"));
+
+        // Parsing recovers the original value unchanged.
+        let parsed: TestRunsOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.runs[0].as_ref().unwrap().status.as_deref(),
+            Some(status_with_c1.as_str())
         );
     }
 }
