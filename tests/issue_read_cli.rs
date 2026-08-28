@@ -1,27 +1,23 @@
-use std::process::{Command, Output};
+mod common;
 
+use common::jcli;
 use httpmock::Method::GET;
 use httpmock::MockServer;
+use std::process::Output;
 
 // base64 of "cli@example.com:cli-test-token"
 const AUTH_HEADER: &str = "Basic Y2xpQGV4YW1wbGUuY29tOmNsaS10ZXN0LXRva2Vu";
 const FIELDS: &str = "summary,status,assignee,reporter,labels,description,attachment";
 
 fn run(server: &MockServer) -> Output {
-    // A unique working directory keeps the child process away from any
-    // stray .env in the shared temp directory; env_clear already isolates
-    // it from HOME and XDG_CONFIG_HOME.
-    let dir = tempfile::tempdir().unwrap();
-    Command::new(env!("CARGO_BIN_EXE_jcli"))
-        .args(["issue", "read", "ABC-123"])
-        .current_dir(dir.path())
-        .env_clear()
-        .env("JIRA_BASE_URL", server.base_url())
-        .env("JCLI_ALLOW_INSECURE_HTTP", "1")
-        .env("JIRA_EMAIL", "cli@example.com")
-        .env("JIRA_API_TOKEN", "cli-test-token")
-        .output()
-        .expect("jcli should start")
+    jcli(
+        &["issue", "read", "ABC-123"],
+        &[
+            ("JIRA_BASE_URL", server.base_url().as_str()),
+            ("JIRA_EMAIL", "cli@example.com"),
+            ("JIRA_API_TOKEN", "cli-test-token"),
+        ],
+    )
 }
 
 #[test]

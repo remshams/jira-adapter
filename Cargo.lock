@@ -878,7 +878,6 @@ dependencies = [
  "clap",
  "dotenvy",
  "httpmock",
- "libc",
  "reqwest",
  "serde",
  "serde_json",

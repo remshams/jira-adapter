@@ -1,5 +1,6 @@
-use std::process::Command;
+mod common;
 
+use common::jcli;
 use httpmock::Method::GET;
 use httpmock::MockServer;
 
@@ -20,20 +21,14 @@ fn whoami_sanitizes_jira_account_fields() {
         }));
     });
 
-    // A unique working directory keeps the child process away from any
-    // stray .env in the shared temp directory; env_clear already isolates
-    // it from HOME and XDG_CONFIG_HOME.
-    let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_jcli"))
-        .arg("whoami")
-        .current_dir(dir.path())
-        .env_clear()
-        .env("JIRA_BASE_URL", server.base_url())
-        .env("JCLI_ALLOW_INSECURE_HTTP", "1")
-        .env("JIRA_EMAIL", "cli@example.com")
-        .env("JIRA_API_TOKEN", "cli-test-token")
-        .output()
-        .expect("jcli should start");
+    let output = jcli(
+        &["whoami"],
+        &[
+            ("JIRA_BASE_URL", server.base_url().as_str()),
+            ("JIRA_EMAIL", "cli@example.com"),
+            ("JIRA_API_TOKEN", "cli-test-token"),
+        ],
+    );
 
     mock.assert_calls(1);
     assert_eq!(output.status.code(), Some(0));

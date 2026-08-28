@@ -1,6 +1,9 @@
+mod common;
+
+use common::jcli_in;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use httpmock::Method::GET;
 use httpmock::MockServer;
@@ -10,16 +13,15 @@ const ISSUE_PATH: &str = "/rest/api/3/issue/ABC-123";
 const FIELDS: &str = "attachment";
 
 fn run(server: &MockServer, directory: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_jcli"))
-        .args(args)
-        .current_dir(directory)
-        .env_clear()
-        .env("JIRA_BASE_URL", server.base_url())
-        .env("JCLI_ALLOW_INSECURE_HTTP", "1")
-        .env("JIRA_EMAIL", "cli@example.com")
-        .env("JIRA_API_TOKEN", "cli-test-token")
-        .output()
-        .expect("jcli should start")
+    jcli_in(
+        directory,
+        args,
+        &[
+            ("JIRA_BASE_URL", server.base_url().as_str()),
+            ("JIRA_EMAIL", "cli@example.com"),
+            ("JIRA_API_TOKEN", "cli-test-token"),
+        ],
+    )
 }
 
 fn metadata(server: &MockServer, attachments: serde_json::Value) -> httpmock::Mock<'_> {

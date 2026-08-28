@@ -76,8 +76,7 @@ fn load_config() -> config::Config {
     // Load configuration only after command arguments that guard
     // configuration access have been validated. Config::load parses the
     // exact `.env` in the working directory itself, without mutating the
-    // process environment, so each setting keeps its source and the
-    // per-user TOML file cannot mix with project-local values.
+    // process environment.
     match config::Config::load() {
         Ok(config) => config,
         Err(error) => exit(2, error),

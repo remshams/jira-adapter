@@ -1,28 +1,20 @@
-use std::process::{Command, Output};
+mod common;
+
+use common::jcli;
+use std::process::Output;
+
+const FAKE_CONFIG: &[(&str, &str)] = &[
+    ("JIRA_BASE_URL", "not a URL"),
+    ("JIRA_EMAIL", "unused@example.com"),
+    ("JIRA_API_TOKEN", "unused-token"),
+];
 
 fn issue_read(value: &str) -> Output {
-    jcli(["issue", "read", value])
+    jcli(&["issue", "read", value], FAKE_CONFIG)
 }
 
 fn issue_attachments(value: &str) -> Output {
-    jcli(["issue", "attachments", value])
-}
-
-fn jcli<const N: usize>(args: [&str; N]) -> Output {
-    // A unique working directory plus a cleared environment keep the
-    // child process away from the host's HOME, XDG_CONFIG_HOME, and any
-    // stray .env, so these tests exercise configuration loading in
-    // isolation.
-    let dir = tempfile::tempdir().unwrap();
-    Command::new(env!("CARGO_BIN_EXE_jcli"))
-        .args(args)
-        .current_dir(dir.path())
-        .env_clear()
-        .env("JIRA_BASE_URL", "not a URL")
-        .env("JIRA_EMAIL", "unused@example.com")
-        .env("JIRA_API_TOKEN", "unused-token")
-        .output()
-        .expect("jcli should start")
+    jcli(&["issue", "attachments", value], FAKE_CONFIG)
 }
 
 #[test]
@@ -47,7 +39,7 @@ fn valid_key_reaches_configuration_loading() {
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "error: invalid URL in JIRA_BASE_URL: expected an HTTPS URL without embedded credentials\n"
+        "error: invalid URL in JIRA_BASE_URL\n"
     );
     assert!(output.stdout.is_empty());
 }
