@@ -6,6 +6,8 @@ use crate::attachments;
 use crate::config;
 use crate::issue_key::IssueKey;
 use crate::jira::client::JiraClient;
+use crate::xray::client::XrayClient;
+use crate::xray::test_runs::TestRunsOutput;
 
 pub(crate) fn read_issue(value: &str) -> ! {
     let issue_key = parse_issue_key(value);
@@ -46,6 +48,34 @@ pub(crate) fn download_attachments(value: &str, output_directory: Option<PathBuf
         }
     };
     write_stdout(&manifest.stdout(&issue_key));
+}
+
+pub(crate) fn xray_test_runs(value: &str) -> ! {
+    let issue_key = parse_issue_key(value);
+    // Both configuration sets are loaded before any request so a missing
+    // setting fails without touching the network.
+    let config = load_config();
+    let xray_config = match config::XrayConfig::load() {
+        Ok(xray) => xray,
+        Err(error) => exit(2, error),
+    };
+    let jira_client = match JiraClient::new(&config) {
+        Ok(client) => client,
+        Err(error) => exit(3, error),
+    };
+    let issue_id = match jira_client.issue_id(&issue_key) {
+        Ok(issue_id) => issue_id,
+        Err(error) => exit(3, error),
+    };
+    let xray_client = match XrayClient::new(&xray_config) {
+        Ok(client) => client,
+        Err(error) => exit(3, error),
+    };
+    let page = match xray_client.test_runs(&issue_id) {
+        Ok(page) => page,
+        Err(error) => exit(3, error),
+    };
+    write_stdout(&TestRunsOutput::from_page(issue_key.as_str(), &page).to_pretty_json());
 }
 
 pub(crate) fn whoami() -> ! {

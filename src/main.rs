@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod issue_key;
 mod jira;
+mod xray;
 
 use std::path::PathBuf;
 
@@ -22,6 +23,11 @@ enum Command {
     Issue {
         #[command(subcommand)]
         command: IssueCommand,
+    },
+    /// Work with Xray Cloud test data
+    Xray {
+        #[command(subcommand)]
+        command: XrayCommand,
     },
     /// Print the account the configured credentials belong to
     Whoami,
@@ -44,6 +50,18 @@ enum IssueCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum XrayCommand {
+    /// List a test issue's test runs as JSON
+    TestRuns {
+        /// Canonical test issue key (e.g. TEST-123)
+        issue: String,
+        /// Emit JSON output (required in this version)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -51,6 +69,9 @@ fn main() {
         Command::Issue { command } => match command {
             IssueCommand::Read { issue } => commands::read_issue(&issue),
             IssueCommand::Attachments { issue, out } => commands::download_attachments(&issue, out),
+        },
+        Command::Xray { command } => match command {
+            XrayCommand::TestRuns { issue, json: _ } => commands::xray_test_runs(&issue),
         },
         Command::Whoami => commands::whoami(),
     }
