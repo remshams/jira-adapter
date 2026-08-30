@@ -257,13 +257,14 @@ fn check_status(response: Response) -> Result<Response, XrayClientError> {
 /// memory (bounded), so error paths never need to touch the body and no
 /// response data can leak into error messages.
 fn read_bounded_body(response: Response, limit: usize) -> Result<Vec<u8>, XrayClientError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > limit as u64)
-    {
+    if content_length_exceeds(response.content_length(), limit) {
         return Err(XrayClientError::ResponseTooLarge);
     }
     read_bounded(response.take(limit as u64 + 1), limit)
+}
+
+fn content_length_exceeds(content_length: Option<u64>, limit: usize) -> bool {
+    content_length.is_some_and(|length| length > limit as u64)
 }
 
 /// Reads at most `limit` bytes from `source`, rejecting anything longer.
@@ -434,6 +435,19 @@ mod tests {
             .unwrap();
 
         graphql.assert_calls(1);
+    }
+
+    #[test]
+    fn response_limits_match_the_api_contract() {
+        assert_eq!(MAX_AUTH_RESPONSE_BYTES, 65_536);
+        assert_eq!(MAX_GRAPHQL_RESPONSE_BYTES, 16_777_216);
+    }
+
+    #[test]
+    fn content_length_limit_accepts_the_boundary() {
+        assert!(!content_length_exceeds(None, 20));
+        assert!(!content_length_exceeds(Some(20), 20));
+        assert!(content_length_exceeds(Some(21), 20));
     }
 
     #[test]
