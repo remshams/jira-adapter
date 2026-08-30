@@ -197,10 +197,7 @@ impl JiraClient {
     ) -> Result<T, JiraClientError> {
         let response = self.authenticated_get(url)?;
         let response = Self::check_json_response(response, error_resource)?;
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_ATTACHMENT_METADATA_BYTES as u64)
-        {
+        if content_length_exceeds(response.content_length(), MAX_ATTACHMENT_METADATA_BYTES) {
             return Err(JiraClientError::MetadataTooLarge);
         }
 
@@ -265,6 +262,10 @@ fn urls_have_same_origin(first: &Url, second: &Url) -> bool {
         && first.port_or_known_default() == second.port_or_known_default()
 }
 
+fn content_length_exceeds(content_length: Option<u64>, limit: usize) -> bool {
+    content_length.is_some_and(|length| length > limit as u64)
+}
+
 fn read_bounded_metadata_body(mut reader: impl Read) -> Result<Vec<u8>, JiraClientError> {
     let mut body = Vec::new();
     reader
@@ -294,6 +295,18 @@ mod tests {
             api_token: "secret-token".to_string(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn metadata_limit_matches_the_response_contract() {
+        assert_eq!(MAX_ATTACHMENT_METADATA_BYTES, 16_777_216);
+    }
+
+    #[test]
+    fn content_length_limit_accepts_the_boundary() {
+        assert!(!content_length_exceeds(None, 20));
+        assert!(!content_length_exceeds(Some(20), 20));
+        assert!(content_length_exceeds(Some(21), 20));
     }
 
     #[test]
@@ -453,14 +466,20 @@ mod tests {
     }
 
     #[test]
-    fn metadata_reader_rejects_an_unannounced_oversized_body_without_truncation() {
+    fn metadata_reader_enforces_the_exact_boundary_without_truncation() {
+        let exact = read_bounded_metadata_body(std::io::Cursor::new(vec![
+            b' ';
+            MAX_ATTACHMENT_METADATA_BYTES
+        ]))
+        .unwrap();
+        assert_eq!(exact.len(), 16_777_216);
+
         let error = read_bounded_metadata_body(std::io::Cursor::new(vec![
             b' ';
             MAX_ATTACHMENT_METADATA_BYTES
                 + 1
         ]))
         .unwrap_err();
-
         assert!(matches!(error, JiraClientError::MetadataTooLarge));
     }
 
@@ -501,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn dot_attachment_ids_are_rejected_before_a_request() {
+    fn attachment_ids_enforce_exact_boundaries_before_a_request() {
         let server = MockServer::start();
         let any_request = server.mock(|when, then| {
             when.method(GET);
@@ -520,6 +539,13 @@ mod tests {
             JiraClientError::InvalidAttachmentId
         ));
         any_request.assert_calls(0);
+
+        let maximum_id = "a".repeat(256);
+        assert_eq!(
+            client.attachment_content(&maximum_id).unwrap().status(),
+            StatusCode::OK
+        );
+        any_request.assert_calls(1);
     }
 
     #[test]
