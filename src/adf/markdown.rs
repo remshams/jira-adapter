@@ -25,6 +25,7 @@ pub fn render_issue(issue: &Issue) -> String {
         .fields
         .description
         .as_ref()
+        .filter(|document| has_meaningful_content(&document.content))
         .map(render_document)
         .filter(|rendered| !rendered.trim().is_empty())
         .unwrap_or_else(|| "No description.".to_string());
@@ -294,8 +295,8 @@ fn render_marked_text(text: &str, marks: &[AdfMark]) -> String {
 
     for mark in marks {
         match mark.mark_type.as_str() {
-            "strong" => rendered = format!("**{rendered}**"),
-            "em" => rendered = format!("*{rendered}*"),
+            "strong" => rendered = wrap_emphasis(rendered, "**"),
+            "em" => rendered = wrap_emphasis(rendered, "*"),
             "link" => {
                 if let Some(destination) = link_destination(mark.attrs.as_ref()) {
                     rendered = format!("[{rendered}]({destination})");
@@ -305,6 +306,18 @@ fn render_marked_text(text: &str, marks: &[AdfMark]) -> String {
         }
     }
     rendered
+}
+
+fn wrap_emphasis(rendered: String, delimiter: &str) -> String {
+    let without_leading = rendered.trim_start_matches(char::is_whitespace);
+    let leading_len = rendered.len() - without_leading.len();
+    let core = without_leading.trim_end_matches(char::is_whitespace);
+    if core.is_empty() {
+        return rendered;
+    }
+    let leading = &rendered[..leading_len];
+    let trailing = &without_leading[core.len()..];
+    format!("{leading}{delimiter}{core}{delimiter}{trailing}")
 }
 
 fn render_inline_code(content: &str) -> String {
@@ -557,6 +570,16 @@ fn append_raw_text(node: &AdfNode, text: &mut String) {
     }
 }
 
+fn has_meaningful_content(nodes: &[AdfNode]) -> bool {
+    nodes.iter().any(|node| {
+        node.text
+            .as_deref()
+            .map(sanitize_code)
+            .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
+            || has_meaningful_content(&node.content)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,8 +688,27 @@ mod tests {
                 {"type": "text", "text": " link", "marks": [{"type": "link", "attrs": {"href": "https://example.com/a b(c)\\d"}}]},
                 {"type": "text", "text": " future", "marks": [{"type": "future"}]}
             ]}])),
-            "**bold*** italic*` code`[ link](https://example.com/a%20b%28c%29%5Cd) future"
+            "**bold** *italic*` code`[ link](https://example.com/a%20b%28c%29%5Cd) future"
         );
+    }
+
+    #[test]
+    fn emphasis_keeps_surrounding_whitespace_outside_delimiters() {
+        for (mark_type, delimiter) in [("strong", "**"), ("em", "*")] {
+            let marks = [AdfMark {
+                mark_type: mark_type.to_string(),
+                attrs: None,
+            }];
+            assert_eq!(
+                render_marked_text(" leading", &marks),
+                format!(" {delimiter}leading{delimiter}")
+            );
+            assert_eq!(
+                render_marked_text("trailing ", &marks),
+                format!("{delimiter}trailing{delimiter} ")
+            );
+            assert_eq!(render_marked_text("   ", &marks), "   ");
+        }
     }
 
     #[test]
@@ -781,13 +823,13 @@ mod tests {
             render(
                 json!([{"type": "paragraph", "content": [{"type": "text", "text": "    strong\n\n    text", "marks": [{"type": "strong"}]}]}])
             ),
-            "**    strong      text**"
+            "&#32;   **strong      text**"
         );
         assert_eq!(
             render(
                 json!([{"type": "paragraph", "content": [{"type": "text", "text": "    em\n\n    text", "marks": [{"type": "em"}]}]}])
             ),
-            "*    em      text*"
+            "&#32;   *em      text*"
         );
         assert_eq!(
             render(
@@ -1031,10 +1073,29 @@ mod tests {
     #[test]
     fn missing_and_effectively_empty_descriptions_use_the_fallback() {
         assert!(render_issue(&issue(None)).ends_with("## Description\n\nNo description.\n"));
-        let empty = document(
+
+        let empty_content = [
             json!([{"type": "paragraph", "content": [{"type": "text", "text": " \n\t\u{1b}"}]}]),
-        );
-        assert!(render_issue(&issue(Some(empty))).ends_with("## Description\n\nNo description.\n"));
+            json!([{"type": "codeBlock", "content": []}]),
+            json!([{"type": "codeBlock", "content": [{"type": "text", "text": " \n\t\u{1b}"}]}]),
+            json!([{"type": "paragraph", "content": [{
+                "type": "text",
+                "text": " \t",
+                "marks": [{"type": "strong"}]
+            }]}]),
+            json!([{"type": "paragraph", "content": [{
+                "type": "text",
+                "text": " \t",
+                "marks": [{"type": "em"}, {"type": "code"}, {
+                    "type": "link",
+                    "attrs": {"href": "https://example.com"}
+                }]
+            }]}]),
+        ];
+        for content in empty_content {
+            let output = render_issue(&issue(Some(document(content))));
+            assert!(output.ends_with("## Description\n\nNo description.\n"));
+        }
     }
 
     #[test]
