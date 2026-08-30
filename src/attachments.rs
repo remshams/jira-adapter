@@ -243,9 +243,14 @@ fn copy_exact_size(
         let count = source
             .read(&mut buffer[..read_limit])
             .map_err(|_| AttachmentError::SourceRead)?;
-        if count == 0 {
-            break;
-        }
+        let Some(count) = std::num::NonZeroUsize::new(count) else {
+            return if copied == expected {
+                Ok(())
+            } else {
+                Err(AttachmentError::SizeMismatch)
+            };
+        };
+        let count = count.get();
 
         copied = copied
             .checked_add(count as u64)
@@ -257,11 +262,6 @@ fn copy_exact_size(
             .write_all(&buffer[..count])
             .map_err(AttachmentError::filesystem)?;
     }
-
-    if copied != expected {
-        return Err(AttachmentError::SizeMismatch);
-    }
-    Ok(())
 }
 
 fn generated_name(id: &str, filename: &str) -> String {
@@ -422,6 +422,14 @@ mod tests {
     }
 
     #[test]
+    fn resource_limits_match_the_download_contract() {
+        assert_eq!(COPY_BUFFER_SIZE, 65_536);
+        assert_eq!(MAX_ATTACHMENT_COUNT, 1_000);
+        assert_eq!(MAX_ATTACHMENT_SIZE_BYTES, 21_474_836_480);
+        assert_eq!(MAX_TOTAL_ATTACHMENT_SIZE_BYTES, 107_374_182_400);
+    }
+
+    #[test]
     fn generated_names_are_safe_deterministic_and_id_prefixed() {
         let first = generated_name("opaque/id?x", "../../a [report]\u{1b}.pdf");
         let second = generated_name("opaque/id?x", "../../a [report]\u{1b}.pdf");
@@ -466,6 +474,18 @@ mod tests {
         assert!(name.starts_with("id-sha256-"));
         assert!(name.len() <= MAX_GENERATED_NAME_BYTES);
         assert!(name.is_ascii());
+
+        let full_budget = generated_name("1", &"a".repeat(MAX_GENERATED_NAME_BYTES));
+        assert_eq!(full_budget.len(), 240);
+        assert_eq!(full_budget, format!("1-{}", "a".repeat(238)));
+    }
+
+    #[test]
+    fn filename_sanitization_respects_exact_budgets() {
+        assert_eq!(sanitized_filename("CON", 8), "file-CON");
+
+        let full = "a".repeat(8);
+        assert_eq!(sanitized_filename(&format!("{full} x"), 8), full);
     }
 
     #[test]
@@ -476,6 +496,13 @@ mod tests {
                 Err(AttachmentError::InvalidId)
             ));
         }
+        let maximum_id = "a".repeat(MAX_ATTACHMENT_ID_BYTES);
+        assert_eq!(
+            plan_downloads(&[attachment(&maximum_id, "a", 0)])
+                .unwrap()
+                .len(),
+            1
+        );
         let oversized_id = "a".repeat(MAX_ATTACHMENT_ID_BYTES + 1);
         assert!(matches!(
             plan_downloads(&[attachment(&oversized_id, "a", 0)]),
@@ -493,6 +520,11 @@ mod tests {
 
     #[test]
     fn plans_enforce_count_file_and_aggregate_limits() {
+        let maximum_count = (0..MAX_ATTACHMENT_COUNT)
+            .map(|index| attachment(&index.to_string(), "a", 0))
+            .collect::<Vec<_>>();
+        assert_eq!(plan_downloads(&maximum_count).unwrap().len(), 1_000);
+
         let too_many = (0..=MAX_ATTACHMENT_COUNT)
             .map(|index| attachment(&index.to_string(), "a", 0))
             .collect::<Vec<_>>();
@@ -500,10 +532,19 @@ mod tests {
             plan_downloads(&too_many),
             Err(AttachmentError::AttachmentCountLimit)
         ));
+
+        let maximum_file =
+            plan_downloads(&[attachment("1", "a", MAX_ATTACHMENT_SIZE_BYTES as i64)]).unwrap();
+        assert_eq!(maximum_file[0].size, 21_474_836_480);
         assert!(matches!(
             plan_downloads(&[attachment("1", "a", (MAX_ATTACHMENT_SIZE_BYTES + 1) as i64)]),
             Err(AttachmentError::AttachmentSizeLimit)
         ));
+
+        let maximum_aggregate = (0..5)
+            .map(|index| attachment(&index.to_string(), "a", MAX_ATTACHMENT_SIZE_BYTES as i64))
+            .collect::<Vec<_>>();
+        assert_eq!(plan_downloads(&maximum_aggregate).unwrap().len(), 5);
 
         let aggregate = (0..6)
             .map(|index| attachment(&index.to_string(), "a", MAX_ATTACHMENT_SIZE_BYTES as i64))
