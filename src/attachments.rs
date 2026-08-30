@@ -330,7 +330,10 @@ fn sanitized_filename(filename: &str, max_bytes: usize) -> String {
 
     if is_windows_reserved_name(&sanitized) {
         let prefix = "file-";
-        if sanitized.len() + prefix.len() <= max_bytes {
+        let Some(remaining) = max_bytes.checked_sub(prefix.len()) else {
+            return prefix[..max_bytes].to_string();
+        };
+        if sanitized.len() <= remaining {
             sanitized.insert_str(0, prefix);
         } else {
             sanitized.replace_range(..prefix.len().min(sanitized.len()), prefix);
@@ -482,6 +485,11 @@ mod tests {
 
     #[test]
     fn filename_sanitization_respects_exact_budgets() {
+        for budget in 0..=8 {
+            let sanitized = sanitized_filename("CON", budget);
+            assert!(sanitized.len() <= budget);
+            assert!(!is_windows_reserved_name(&sanitized));
+        }
         assert_eq!(sanitized_filename("CON", 8), "file-CON");
 
         let full = "a".repeat(8);
@@ -687,7 +695,9 @@ mod tests {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             if !self.waited && self.content.position() == self.content.get_ref().len() as u64 {
                 self.ready.send(()).unwrap();
-                self.release.recv().unwrap();
+                self.release
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
                 self.waited = true;
             }
             self.content.read(buffer)
@@ -712,7 +722,9 @@ mod tests {
             download_all(&source, &[first_item], &first_output)
         });
 
-        ready_receiver.recv().unwrap();
+        ready_receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         let second_result = download_all(&FakeSource::bytes(&[b"later"]), &[item], &output);
         release_sender.send(()).unwrap();
         let first_result = first_run.join().unwrap();
