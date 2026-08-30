@@ -23,5 +23,8 @@ pub fn jcli_in(directory: &Path, args: &[&str], env: &[(&str, &str)]) -> Output 
     for (key, value) in env {
         command.env(key, value);
     }
+    if let Some(profile_file) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile_file);
+    }
     command.output().expect("jcli should start")
 }
