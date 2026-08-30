@@ -6,6 +6,12 @@ Jira adapter is a cli tool that agents are using to connect to jira e.g. for rea
 
 - Always apply the `unslop` skill when writing or editing any text (responses, code comments, docs, commit messages, etc.)
 
+## Validation
+
+- After completing a task or feature, run `cargo test` and `cargo mutants` before handoff.
+- Use cargo-mutants 27.1.0. Install it with `cargo install --locked cargo-mutants --version 27.1.0` if it is unavailable.
+- Treat missed and timed-out mutants as failures. Report any that cannot be resolved.
+
 ## Trust model
 
 jcli assumes good user behavior:
