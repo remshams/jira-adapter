@@ -25,7 +25,6 @@ pub fn render_issue(issue: &Issue) -> String {
         .fields
         .description
         .as_ref()
-        .filter(|document| has_meaningful_content(&document.content))
         .map(render_document)
         .filter(|rendered| !rendered.trim().is_empty())
         .unwrap_or_else(|| "No description.".to_string());
@@ -97,8 +96,6 @@ fn push_nonempty(blocks: &mut Vec<String>, block: String) {
 
 fn render_block(node: &AdfNode) -> String {
     match node.node_type.as_str() {
-        "doc" | "document" => render_blocks(&node.content),
-        "paragraph" => render_mixed_content(render_own_text(node), &node.content),
         "heading" => render_heading(node),
         "bulletList" => render_list(node, None),
         "orderedList" => render_list(
@@ -151,11 +148,7 @@ fn render_list(node: &AdfNode, ordered_start: Option<u64>) -> String {
     let mut number = ordered_start.unwrap_or(1);
 
     for child in &node.content {
-        let content = if child.node_type == "listItem" {
-            render_list_item_contents(&child.content)
-        } else {
-            render_block(child)
-        };
+        let content = render_block(child);
         if content.trim().is_empty() {
             continue;
         }
@@ -198,17 +191,19 @@ fn render_list_item_contents(nodes: &[AdfNode]) -> String {
     }
     push_list_part(&mut parts, protect_inline_block_starts(&inline), false);
 
-    let mut output = String::new();
-    for (index, (part, is_list)) in parts.iter().enumerate() {
-        if index > 0 {
-            let previous_is_list = parts[index - 1].1;
-            output.push_str(if *is_list || previous_is_list {
-                "\n"
-            } else {
-                "\n\n"
-            });
-        }
+    let Some(((first, first_is_list), remaining)) = parts.split_first() else {
+        return String::new();
+    };
+    let mut output = first.clone();
+    let mut previous_is_list = *first_is_list;
+    for (part, is_list) in remaining {
+        output.push_str(if *is_list || previous_is_list {
+            "\n"
+        } else {
+            "\n\n"
+        });
         output.push_str(part);
+        previous_is_list = *is_list;
     }
     output
 }
@@ -275,11 +270,6 @@ fn render_inlines(nodes: &[AdfNode]) -> String {
 
 fn render_inline_node(node: &AdfNode) -> String {
     match node.node_type.as_str() {
-        "text" => node
-            .text
-            .as_deref()
-            .map(|text| render_marked_text(text, &node.marks))
-            .unwrap_or_default(),
         "hardBreak" => "  \n".to_string(),
         _ => {
             let mut rendered = node
@@ -306,7 +296,6 @@ fn render_marked_text(text: &str, marks: &[AdfMark]) -> String {
         match mark.mark_type.as_str() {
             "strong" => rendered = format!("**{rendered}**"),
             "em" => rendered = format!("*{rendered}*"),
-            "code" => {}
             "link" => {
                 if let Some(destination) = link_destination(mark.attrs.as_ref()) {
                     rendered = format!("[{rendered}]({destination})");
@@ -518,10 +507,6 @@ fn sanitize_inline(text: &str) -> String {
 }
 
 fn sanitize_code(text: &str) -> String {
-    sanitize_preserving_layout(text, true)
-}
-
-fn sanitize_preserving_layout(text: &str, preserve_tabs: bool) -> String {
     let mut sanitized = String::new();
     let mut characters = text.chars().peekable();
     while let Some(character) = characters.next() {
@@ -533,8 +518,7 @@ fn sanitize_preserving_layout(text: &str, preserve_tabs: bool) -> String {
                 sanitized.push('\n');
             }
             '\n' => sanitized.push('\n'),
-            '\t' if preserve_tabs => sanitized.push('\t'),
-            '\t' => sanitized.push(' '),
+            '\t' => sanitized.push('\t'),
             character if is_unsafe_control(character) => {}
             character => sanitized.push(character),
         }
@@ -571,16 +555,6 @@ fn append_raw_text(node: &AdfNode, text: &mut String) {
             append_raw_text(child, text);
         }
     }
-}
-
-fn has_meaningful_content(nodes: &[AdfNode]) -> bool {
-    nodes.iter().any(|node| {
-        node.text
-            .as_deref()
-            .map(sanitize_code)
-            .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()))
-            || has_meaningful_content(&node.content)
-    })
 }
 
 #[cfg(test)]
@@ -714,6 +688,20 @@ mod tests {
     }
 
     #[test]
+    fn link_destinations_escape_markdown_delimiters() {
+        assert_eq!(
+            render(json!([{"type": "paragraph", "content": [{
+                "type": "text",
+                "text": "label",
+                "marks": [{"type": "link", "attrs": {
+                    "href": "https://example.com/a<b>c\"d"
+                }}]
+            }]}])),
+            "[label](https://example.com/a%3Cb%3Ec%22d)"
+        );
+    }
+
+    #[test]
     fn only_absolute_http_and_https_links_are_active() {
         for href in [
             "JaVaScRiPt:alert(1)",
@@ -817,18 +805,21 @@ mod tests {
 
     #[test]
     fn inline_code_uses_a_delimiter_longer_than_its_backticks() {
-        assert_eq!(
-            render(
-                json!([{"type": "paragraph", "content": [{"type": "text", "text": "a``b", "marks": [{"type": "code"}]}]}])
-            ),
-            "```a``b```"
-        );
-        assert_eq!(
-            render(
-                json!([{"type": "paragraph", "content": [{"type": "text", "text": "`edge`", "marks": [{"type": "code"}]}]}])
-            ),
-            "`` `edge` ``"
-        );
+        for (content, expected) in [
+            ("a``b", "```a``b```"),
+            ("`edge`", "`` `edge` ``"),
+            ("`start", "`` `start ``"),
+            ("end`", "`` end` ``"),
+            (" spaced ", "`  spaced  `"),
+            ("   ", "`   `"),
+        ] {
+            assert_eq!(
+                render(
+                    json!([{"type": "paragraph", "content": [{"type": "text", "text": content, "marks": [{"type": "code"}]}]}])
+                ),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -887,6 +878,16 @@ mod tests {
     }
 
     #[test]
+    fn code_blocks_normalize_line_endings_and_remove_controls() {
+        assert_eq!(
+            render(
+                json!([{"type": "codeBlock", "content": [{"type": "text", "text": "a\r\nb\rc\t\u{1b}"}]}])
+            ),
+            "```\na\nb\nc\t\n```"
+        );
+    }
+
+    #[test]
     fn renders_code_blocks_with_safe_languages_and_long_fences() {
         assert_eq!(
             render(
@@ -916,12 +917,12 @@ mod tests {
     #[test]
     fn unknown_nodes_preserve_text_and_known_descendants() {
         assert_eq!(
-            render(json!([{"type": "futureBlock", "content": [
+            render(json!([{"type": "futureBlock", "text": "own", "content": [
                 {"type": "paragraph", "content": [
                     {"type": "futureInline", "content": [{"type": "text", "text": "kept", "marks": [{"type": "futureMark"}]}]}
                 ]}
             ]}])),
-            "kept"
+            "own\n\nkept"
         );
     }
 
@@ -977,6 +978,16 @@ mod tests {
             ),
             "## before\n\n- nested\n\nafter"
         );
+        assert_eq!(
+            render(
+                json!([{"type": "heading", "attrs": {"level": 2}, "content": [
+                    {"type": "bulletList", "content": [{"type": "listItem", "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "nested"}]}
+                    ]}]}
+                ]}])
+            ),
+            "- nested"
+        );
     }
 
     #[test]
@@ -986,6 +997,14 @@ mod tests {
                 json!([{"type": "paragraph", "content": [{"type": "text", "text": "# [x](y) *z* - q\u{1b}[31m\u{7}"}]}])
             ),
             "\\# \\[x\\]\\(y\\) \\*z\\* \\- q\\[31m"
+        );
+    }
+
+    #[test]
+    fn ordered_list_lookalikes_remain_plain_text() {
+        assert_eq!(
+            protect_ordered_list_starts(". item\n123x item\n1. item\n"),
+            ". item\n123x item\n1\\. item\n"
         );
     }
 
