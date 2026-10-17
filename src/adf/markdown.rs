@@ -97,16 +97,22 @@ fn push_nonempty(blocks: &mut Vec<String>, block: String) {
 
 fn render_block(node: &AdfNode) -> String {
     match node.node_type.as_str() {
+        "bulletList" | "orderedList" | "listItem" => render_list_block(node),
         "heading" => render_heading(node),
+        "codeBlock" => render_code_block(node),
+        "blockquote" => render_blockquote(node),
+        _ => render_unknown_block(node),
+    }
+}
+
+fn render_list_block(node: &AdfNode) -> String {
+    match node.node_type.as_str() {
         "bulletList" => render_list(node, None),
         "orderedList" => render_list(
             node,
             Some(ordered_list_start(node.attrs.as_ref()).unwrap_or(1)),
         ),
-        "listItem" => render_list_item_contents(&node.content),
-        "codeBlock" => render_code_block(node),
-        "blockquote" => render_blockquote(node),
-        _ => render_unknown_block(node),
+        _ => render_list_item_contents(&node.content),
     }
 }
 
@@ -172,6 +178,12 @@ fn render_list(node: &AdfNode, ordered_start: Option<u64>) -> String {
 }
 
 fn render_list_item_contents(nodes: &[AdfNode]) -> String {
+    join_list_parts(&list_item_parts(nodes))
+}
+
+/// Renders list item children into non-empty parts, each flagged with
+/// whether it is a nested list.
+fn list_item_parts(nodes: &[AdfNode]) -> Vec<(String, bool)> {
     let mut parts = Vec::new();
     let mut inline = String::new();
     for node in nodes {
@@ -191,7 +203,12 @@ fn render_list_item_contents(nodes: &[AdfNode]) -> String {
         }
     }
     push_list_part(&mut parts, protect_inline_block_starts(&inline), false);
+    parts
+}
 
+/// Joins list item parts with a blank line between paragraphs and a single
+/// newline next to nested lists.
+fn join_list_parts(parts: &[(String, bool)]) -> String {
     let Some(((first, first_is_list), remaining)) = parts.split_first() else {
         return String::new();
     };
@@ -287,25 +304,28 @@ fn render_inline_node(node: &AdfNode) -> String {
 fn render_marked_text(text: &str, marks: &[AdfMark]) -> String {
     let content = sanitize_inline(text);
     let has_code = marks.iter().any(|mark| mark.mark_type == "code");
-    let mut rendered = if has_code {
+    let rendered = if has_code {
         render_inline_code(&content)
     } else {
         escape_markdown(&content, true)
     };
+    marks.iter().fold(rendered, apply_mark)
+}
 
-    for mark in marks {
-        match mark.mark_type.as_str() {
-            "strong" => rendered = wrap_emphasis(rendered, "**"),
-            "em" => rendered = wrap_emphasis(rendered, "*"),
-            "link" => {
-                if let Some(destination) = link_destination(mark.attrs.as_ref()) {
-                    rendered = format!("[{rendered}]({destination})");
-                }
-            }
-            _ => {}
-        }
+fn apply_mark(rendered: String, mark: &AdfMark) -> String {
+    match mark.mark_type.as_str() {
+        "strong" => wrap_emphasis(rendered, "**"),
+        "em" => wrap_emphasis(rendered, "*"),
+        "link" => wrap_link(rendered, mark),
+        _ => rendered,
     }
-    rendered
+}
+
+fn wrap_link(rendered: String, mark: &AdfMark) -> String {
+    match link_destination(mark.attrs.as_ref()) {
+        Some(destination) => format!("[{rendered}]({destination})"),
+        None => rendered,
+    }
 }
 
 fn wrap_emphasis(rendered: String, delimiter: &str) -> String {
@@ -369,33 +389,48 @@ fn is_safe_language(language: &str) -> bool {
 
 fn link_destination(attrs: Option<&Value>) -> Option<String> {
     let href = string_attr(attrs, "href")?;
-    if href.trim().is_empty() || href.chars().any(is_unsafe_control) {
-        return None;
-    }
-    let parsed = url::Url::parse(href).ok()?;
-    let scheme = parsed.scheme();
-    let scheme_separator = href.get(scheme.len()..scheme.len() + 3);
-    if scheme_separator != Some("://")
-        || !parsed.has_host()
-        || !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
-    {
-        return None;
-    }
+    is_safe_link(href).then(|| escape_link_destination(href))
+}
 
+fn is_safe_link(href: &str) -> bool {
+    !href.trim().is_empty()
+        && !href.chars().any(is_unsafe_control)
+        && url::Url::parse(href).is_ok_and(|parsed| is_web_url(&parsed, href))
+}
+
+/// Accepts absolute http(s) URLs with a host, written with `://` exactly as
+/// parsed, so the rendered link points where the raw text says it does.
+fn is_web_url(parsed: &url::Url, href: &str) -> bool {
+    let scheme = parsed.scheme();
+    href.get(scheme.len()..scheme.len() + 3) == Some("://")
+        && parsed.has_host()
+        && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+}
+
+/// Characters that would end or break a Markdown link destination, with
+/// their percent-encoded replacements.
+const LINK_ESCAPES: [(char, &str); 7] = [
+    ('\\', "%5C"),
+    (' ', "%20"),
+    ('(', "%28"),
+    (')', "%29"),
+    ('<', "%3C"),
+    ('>', "%3E"),
+    ('"', "%22"),
+];
+
+fn escape_link_destination(href: &str) -> String {
     let mut escaped = String::new();
     for character in href.chars() {
-        match character {
-            '\\' => escaped.push_str("%5C"),
-            ' ' => escaped.push_str("%20"),
-            '(' => escaped.push_str("%28"),
-            ')' => escaped.push_str("%29"),
-            '<' => escaped.push_str("%3C"),
-            '>' => escaped.push_str("%3E"),
-            '"' => escaped.push_str("%22"),
-            _ => escaped.push(character),
+        match LINK_ESCAPES
+            .iter()
+            .find(|(unsafe_character, _)| *unsafe_character == character)
+        {
+            Some((_, replacement)) => escaped.push_str(replacement),
+            None => escaped.push(character),
         }
     }
-    Some(escaped)
+    escaped
 }
 
 fn escape_metadata(text: &str) -> String {
@@ -502,15 +537,8 @@ fn sanitize_single_line(text: &str) -> String {
 
 fn sanitize_inline(text: &str) -> String {
     let mut sanitized = String::new();
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
+    for character in normalize_line_endings(text).chars() {
         match character {
-            '\r' => {
-                if characters.peek() == Some(&'\n') {
-                    characters.next();
-                }
-                sanitized.push(' ');
-            }
             '\n' | '\t' => sanitized.push(' '),
             character if is_unsafe_control(character) => {}
             character => sanitized.push(character),
@@ -520,23 +548,19 @@ fn sanitize_inline(text: &str) -> String {
 }
 
 fn sanitize_code(text: &str) -> String {
-    let mut sanitized = String::new();
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
-        match character {
-            '\r' => {
-                if characters.peek() == Some(&'\n') {
-                    characters.next();
-                }
-                sanitized.push('\n');
-            }
-            '\n' => sanitized.push('\n'),
-            '\t' => sanitized.push('\t'),
-            character if is_unsafe_control(character) => {}
-            character => sanitized.push(character),
-        }
-    }
-    sanitized
+    normalize_line_endings(text)
+        .chars()
+        .filter(|&character| is_code_character(character))
+        .collect()
+}
+
+fn is_code_character(character: char) -> bool {
+    matches!(character, '\n' | '\t') || !is_unsafe_control(character)
+}
+
+/// Folds `\r\n` pairs and lone `\r` into a single `\n`.
+fn normalize_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn is_unsafe_control(character: char) -> bool {
