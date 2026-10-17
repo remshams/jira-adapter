@@ -185,19 +185,7 @@ impl XrayClient {
         let response = self.http.post(url).bearer_auth(token).json(&body).send()?;
         let response = check_status(response)?;
         let body = read_bounded_body(response, MAX_GRAPHQL_RESPONSE_BYTES)?;
-        let parsed: GetTestRunsResponse =
-            serde_json::from_slice(&body).map_err(|_| XrayClientError::InvalidGraphQlResponse)?;
-        // GraphQL reports failures in the body while keeping HTTP 200.
-        // The server message is deliberately discarded: it may echo
-        // credentials or untrusted input, so only a generic error is
-        // reported.
-        if !parsed.errors.is_empty() {
-            return Err(XrayClientError::GraphQl);
-        }
-        parsed
-            .data
-            .and_then(|data| data.get_test_runs)
-            .ok_or(XrayClientError::InvalidGraphQlResponse)
+        parse_test_runs(&body)
     }
 
     fn post_json(&self, url: Url, body: &serde_json::Value) -> Result<Response, XrayClientError> {
@@ -236,13 +224,33 @@ impl From<reqwest::Error> for XrayClientError {
     }
 }
 
+fn parse_test_runs(body: &[u8]) -> Result<TestRunPage, XrayClientError> {
+    let parsed: GetTestRunsResponse =
+        serde_json::from_slice(body).map_err(|_| XrayClientError::InvalidGraphQlResponse)?;
+    // GraphQL reports failures in the body while keeping HTTP 200.
+    // The server message is deliberately discarded: it may echo
+    // credentials or untrusted input, so only a generic error is
+    // reported.
+    if !parsed.errors.is_empty() {
+        return Err(XrayClientError::GraphQl);
+    }
+    parsed
+        .data
+        .and_then(|data| data.get_test_runs)
+        .ok_or(XrayClientError::InvalidGraphQlResponse)
+}
+
 fn check_status(response: Response) -> Result<Response, XrayClientError> {
     let status = response.status();
     if status.is_success() {
-        return Ok(response);
+        Ok(response)
+    } else {
+        Err(status_error(status))
     }
+}
 
-    Err(match status {
+fn status_error(status: StatusCode) -> XrayClientError {
+    match status {
         StatusCode::UNAUTHORIZED => XrayClientError::Unauthorized,
         StatusCode::FORBIDDEN => XrayClientError::Forbidden,
         StatusCode::NOT_FOUND => XrayClientError::NotFound,
@@ -250,7 +258,7 @@ fn check_status(response: Response) -> Result<Response, XrayClientError> {
         other => XrayClientError::Api {
             status: other.as_u16(),
         },
-    })
+    }
 }
 
 /// Reads at most `limit` bytes of the body. The response is read fully into
