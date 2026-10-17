@@ -10,7 +10,8 @@ pub fn render_issue(issue: &Issue) -> String {
         .fields
         .issue_type
         .as_ref()
-        .and_then(|issue_type| nonempty_metadata(&issue_type.name))
+        .and_then(|issue_type| issue_type.name.as_deref())
+        .and_then(nonempty_metadata)
         .unwrap_or_else(|| "Unknown".to_string());
     let status = escape_metadata(&issue.fields.status.name);
     let assignee = account_name(issue.fields.assignee.as_ref(), "Unassigned");
@@ -658,7 +659,7 @@ mod tests {
             fields: IssueFields {
                 summary: "Fix the thing".to_string(),
                 issue_type: Some(IssueType {
-                    name: "Bug".to_string(),
+                    name: Some("Bug".to_string()),
                 }),
                 status: Status {
                     name: "In Progress".to_string(),
@@ -1290,6 +1291,23 @@ mod tests {
 
         assert!(render_issue(&issue).contains("- Type: Unknown\n"));
         assert!(render_issue(&issue).contains("- Created: Unknown\n"));
+    }
+
+    #[test]
+    fn issue_types_without_a_name_render_as_unknown() {
+        for issue_type in [json!({}), json!({"name": null})] {
+            let issue: Issue = serde_json::from_value(json!({
+                "key": "ABC-123",
+                "fields": {
+                    "summary": "Summary",
+                    "issuetype": issue_type,
+                    "status": {"name": "Open"}
+                }
+            }))
+            .unwrap();
+
+            assert!(render_issue(&issue).contains("- Type: Unknown\n"));
+        }
     }
 
     #[test]
