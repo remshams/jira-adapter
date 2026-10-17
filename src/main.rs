@@ -3,6 +3,7 @@ mod attachments;
 mod commands;
 mod config;
 mod issue_key;
+mod issue_search;
 mod jira;
 mod output;
 mod xray;
@@ -51,6 +52,23 @@ enum IssueCommand {
         #[arg(long, value_name = "DIRECTORY")]
         out: Option<PathBuf>,
     },
+    /// Search issues with JQL and print the first page as JSON
+    Search {
+        /// JQL query, passed to Jira unchanged. Use ORDER BY to sort.
+        #[arg(long, value_name = "JQL", allow_hyphen_values = true)]
+        jql: String,
+        /// Emit JSON output (required in this version)
+        #[arg(long, required = true)]
+        json: bool,
+        /// Maximum number of issues to return (1-100)
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..=100)
+        )]
+        limit: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -89,6 +107,11 @@ fn run_issue(command: IssueCommand) -> ! {
     match command {
         IssueCommand::Read { issue } => commands::read_issue(&issue),
         IssueCommand::Attachments { issue, out } => commands::download_attachments(&issue, out),
+        IssueCommand::Search {
+            jql,
+            json: _,
+            limit,
+        } => commands::search_issues(&jql, limit),
     }
 }
 

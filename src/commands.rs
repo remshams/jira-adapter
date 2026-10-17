@@ -5,6 +5,7 @@ use crate::adf;
 use crate::attachments;
 use crate::config;
 use crate::issue_key::IssueKey;
+use crate::issue_search::IssueSearchOutput;
 use crate::jira::client::JiraClient;
 use crate::output::terminal_field;
 use crate::xray::client::XrayClient;
@@ -16,6 +17,13 @@ pub(crate) fn read_issue(value: &str) -> ! {
     let client = or_exit(JiraClient::new(&config), 3);
     let issue = or_exit(client.issue(&issue_key), 3);
     write_stdout(&adf::render_issue(&issue));
+}
+
+pub(crate) fn search_issues(jql: &str, limit: u32) -> ! {
+    let config = load_config();
+    let client = or_exit(JiraClient::new(&config), 3);
+    let page = or_exit(client.search_issues(jql, limit), 3);
+    write_stdout(&IssueSearchOutput::from_page(jql, page).to_pretty_json());
 }
 
 pub(crate) fn download_attachments(value: &str, output_directory: Option<PathBuf>) -> ! {

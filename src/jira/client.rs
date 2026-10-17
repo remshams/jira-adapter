@@ -167,10 +167,6 @@ impl JiraClient {
     /// Runs a JQL search and returns only the first page of at most `limit`
     /// issues. The query is passed to Jira unchanged. A 400 response carries
     /// Jira's explanation of the rejected query; see [`invalid_query_error`].
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by the issue search command")
-    )]
     pub fn search_issues(&self, jql: &str, limit: u32) -> Result<SearchPage, JiraClientError> {
         let mut url = self.endpoint_url(&["rest", "api", "3", "search", "jql"])?;
         url.query_pairs_mut()
