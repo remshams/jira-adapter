@@ -340,16 +340,26 @@ fn query_error_messages(response: Response) -> Option<String> {
         .errors
         .into_iter()
         .flatten()
-        .map(|(field, message)| format!("{field}: {message}"));
+        .filter_map(|(field, message)| {
+            let message = error_line(&message)?;
+            let field = error_line(&field).unwrap_or_default();
+            Some(format!("{field}: {message}"))
+        });
     let messages: Vec<String> = collection
         .error_messages
         .into_iter()
         .flatten()
+        .filter_map(|message| error_line(&message))
         .chain(field_messages)
-        .map(|message| terminal_field(Some(&message), "").trim().to_owned())
-        .filter(|message| !message.is_empty())
         .collect();
     (!messages.is_empty()).then(|| messages.join("; "))
+}
+
+/// One terminal-safe piece of a Jira error, or `None` when nothing visible
+/// remains.
+fn error_line(text: &str) -> Option<String> {
+    let line = terminal_field(Some(text), "").trim().to_owned();
+    (!line.is_empty()).then_some(line)
 }
 
 fn same_origin_redirect_policy() -> Policy {
@@ -1185,6 +1195,7 @@ mod tests {
                 ],
                 "errors": {
                     "summary": "Field\n'summary' is \u{9b}odd",
+                    "labels": " \u{7}",
                     "jql": "Expected a value"
                 }
             })
@@ -1208,6 +1219,8 @@ mod tests {
             serde_json::json!({"errorMessages": null, "errors": null}).to_string(),
             serde_json::json!({"errorMessages": [], "errors": {}}).to_string(),
             serde_json::json!({"errorMessages": ["\u{1b}\u{202e}", " "]}).to_string(),
+            serde_json::json!({"errors": {"jql": ""}}).to_string(),
+            serde_json::json!({"errors": {"jql": " \u{1b}\u{7}\u{202e}\t"}}).to_string(),
             serde_json::json!({"errorMessages": [42]}).to_string(),
         ] {
             let server = MockServer::start();
