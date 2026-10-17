@@ -613,6 +613,42 @@ mod tests {
     }
 
     #[test]
+    fn sort_classes_outrank_ids_and_original_position() {
+        // IDs and input order both favor the reverse of the class order, so
+        // only the class decides: instant, then unparseable, then null.
+        let mut page = page_with(
+            Some(4),
+            Some(vec![
+                run_at("run-1", None),
+                None,
+                Some(TestRun {
+                    id: None,
+                    status: None,
+                    started_on: Some("not-a-timestamp".to_owned()),
+                    finished_on: None,
+                    test_execution: None,
+                }),
+                run_at("run-9", Some("2024-05-01T12:00:00Z")),
+            ]),
+        );
+
+        sort_page(
+            &mut page,
+            TestRunSortField::StartedOn,
+            TestRunSortDirection::Asc,
+        );
+
+        let results = page.results.as_ref().unwrap();
+        assert_eq!(
+            sorted_ids(results),
+            [Some("run-9"), Some("run-1"), None, None]
+        );
+        // The unparseable run with a null ID precedes the null entry.
+        assert!(results[2].is_some());
+        assert!(results[3].is_none());
+    }
+
+    #[test]
     fn equal_instants_break_ties_by_id_then_original_position() {
         // All three runs name the same instant; run-d has a null ID.
         let mut page = page_with(
