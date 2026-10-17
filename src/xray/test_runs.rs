@@ -141,22 +141,29 @@ fn sort_key(entry: &Option<TestRun>, field: TestRunSortField) -> SortKey {
 
 fn compare_keys(a: &SortKey, b: &SortKey, ascending: bool) -> Ordering {
     match (a, b) {
-        (SortKey::Null, SortKey::Null) => Ordering::Equal,
-        (SortKey::Null, _) => Ordering::Greater,
-        (_, SortKey::Null) => Ordering::Less,
-        (SortKey::Unparseable, SortKey::Unparseable) => Ordering::Equal,
-        (SortKey::Unparseable, SortKey::Instant(_)) => Ordering::Greater,
-        (SortKey::Instant(_), SortKey::Unparseable) => Ordering::Less,
-        (SortKey::Instant(a), SortKey::Instant(b)) => {
-            // OffsetDateTime orders by instant, so runs compare correctly
-            // across UTC offsets.
-            let ordering = a.cmp(b);
-            if ascending {
-                ordering
-            } else {
-                ordering.reverse()
-            }
-        }
+        (SortKey::Instant(a), SortKey::Instant(b)) => compare_instants(a, b, ascending),
+        _ => class_rank(a).cmp(&class_rank(b)),
+    }
+}
+
+/// Orders sort classes independent of the direction: instants first, then
+/// unparseable timestamps, then null entries.
+fn class_rank(key: &SortKey) -> u8 {
+    match key {
+        SortKey::Instant(_) => 0,
+        SortKey::Unparseable => 1,
+        SortKey::Null => 2,
+    }
+}
+
+fn compare_instants(a: &OffsetDateTime, b: &OffsetDateTime, ascending: bool) -> Ordering {
+    // OffsetDateTime orders by instant, so runs compare correctly across
+    // UTC offsets.
+    let ordering = a.cmp(b);
+    if ascending {
+        ordering
+    } else {
+        ordering.reverse()
     }
 }
 
