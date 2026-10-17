@@ -555,7 +555,7 @@ fn protect_ordered_list_starts(text: &str) -> String {
 fn sanitize_single_line(text: &str) -> String {
     let mut sanitized = String::new();
     for character in text.chars() {
-        if matches!(character, '\n' | '\r' | '\t') {
+        if matches!(character, '\n' | '\r' | '\t' | '\u{2028}' | '\u{2029}') {
             sanitized.push(' ');
         } else if !is_unsafe_control(character) {
             sanitized.push(character);
@@ -568,7 +568,7 @@ fn sanitize_inline(text: &str) -> String {
     let mut sanitized = String::new();
     for character in normalize_line_endings(text).chars() {
         match character {
-            '\n' | '\t' => sanitized.push(' '),
+            '\n' | '\t' | '\u{2028}' | '\u{2029}' => sanitized.push(' '),
             character if is_unsafe_control(character) => {}
             character => sanitized.push(character),
         }
@@ -1100,6 +1100,16 @@ mod tests {
     }
 
     #[test]
+    fn unicode_line_separators_in_text_become_spaces() {
+        assert_eq!(
+            render(
+                json!([{"type": "paragraph", "content": [{"type": "text", "text": "a\u{2028}b\u{2029}c"}]}])
+            ),
+            "a b c"
+        );
+    }
+
+    #[test]
     fn ordered_list_lookalikes_remain_plain_text() {
         assert_eq!(
             protect_ordered_list_starts(". item\n123x item\n1. item\n"),
@@ -1345,5 +1355,24 @@ mod tests {
         assert!(output.contains("- Type: \\[Bug\\]\\(x\\) \\# forged\n"));
         assert!(output.contains("- Created: 2026-10-17 \\*today\\*\\[31m \\# forged\n"));
         assert!(!output.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn unicode_line_separators_in_metadata_become_spaces() {
+        let issue: Issue = serde_json::from_value(json!({
+            "key": "ABC-123",
+            "fields": {
+                "summary": "Summary\u{2028}# forged",
+                "issuetype": {"name": "Bug\u{2029}details"},
+                "status": {"name": "Open"},
+                "description": null
+            }
+        }))
+        .unwrap();
+        let output = render_issue(&issue);
+
+        assert!(output.contains("ABC-123: Summary \\# forged"));
+        assert!(output.contains("- Type: Bug details\n"));
+        assert!(!output.contains(['\u{2028}', '\u{2029}']));
     }
 }
