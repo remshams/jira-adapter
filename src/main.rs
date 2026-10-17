@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod issue_key;
 mod jira;
+mod output;
 mod xray;
 
 use std::path::PathBuf;
