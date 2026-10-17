@@ -1,4 +1,4 @@
-threshold = 30.0
+threshold = 6.0
 fail-above = true
 missing = "pessimistic"
 sort = "file"
