@@ -78,19 +78,27 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Issue { command } => match command {
-            IssueCommand::Read { issue } => commands::read_issue(&issue),
-            IssueCommand::Attachments { issue, out } => commands::download_attachments(&issue, out),
-        },
-        Command::Xray { command } => match command {
-            XrayCommand::TestRuns {
-                issue,
-                json: _,
-                statuses,
-                sort,
-                direction,
-            } => commands::xray_test_runs(&issue, statuses, sort, direction),
-        },
+        Command::Issue { command } => run_issue(command),
+        Command::Xray { command } => run_xray(command),
         Command::Whoami => commands::whoami(),
+    }
+}
+
+fn run_issue(command: IssueCommand) -> ! {
+    match command {
+        IssueCommand::Read { issue } => commands::read_issue(&issue),
+        IssueCommand::Attachments { issue, out } => commands::download_attachments(&issue, out),
+    }
+}
+
+fn run_xray(command: XrayCommand) -> ! {
+    match command {
+        XrayCommand::TestRuns {
+            issue,
+            json: _,
+            statuses,
+            sort,
+            direction,
+        } => commands::xray_test_runs(&issue, statuses, sort, direction),
     }
 }
