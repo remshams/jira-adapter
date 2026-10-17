@@ -198,15 +198,23 @@ fn resolved(
     match env(name) {
         Lookup::Value(value) => content_or_empty(value, name),
         Lookup::NonUnicode => Err(ConfigError::Empty(name)),
-        Lookup::Absent => {
-            if let Some(value) = dot_env.and_then(|values| values.get(name)) {
-                return content_or_empty(value.clone(), name);
-            }
-            match file.and_then(|file| file.get(name)) {
-                Some(value) => content_or_empty(value.to_owned(), name),
-                None => Err(ConfigError::Missing(name)),
-            }
-        }
+        Lookup::Absent => resolved_from_files(dot_env, file, name),
+    }
+}
+
+/// The `.env` and TOML part of [`resolved`], used when the environment does
+/// not set `name`.
+fn resolved_from_files(
+    dot_env: Option<&BTreeMap<String, String>>,
+    file: Option<&FileValues>,
+    name: &'static str,
+) -> Result<String, ConfigError> {
+    if let Some(value) = dot_env.and_then(|values| values.get(name)) {
+        return content_or_empty(value.clone(), name);
+    }
+    match file.and_then(|file| file.get(name)) {
+        Some(value) => content_or_empty(value.to_owned(), name),
+        None => Err(ConfigError::Missing(name)),
     }
 }
 
@@ -260,6 +268,12 @@ impl FileValues {
             BASE_URL_VAR => self.base_url.as_deref(),
             EMAIL_VAR => self.email.as_deref(),
             API_TOKEN_VAR => self.api_token.as_deref(),
+            _ => self.xray_value(name),
+        }
+    }
+
+    fn xray_value(&self, name: &str) -> Option<&str> {
+        match name {
             XRAY_BASE_URL_VAR => self.xray_base_url.as_deref(),
             XRAY_CLIENT_ID_VAR => self.xray_client_id.as_deref(),
             XRAY_CLIENT_SECRET_VAR => self.xray_client_secret.as_deref(),
