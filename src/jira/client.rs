@@ -1,4 +1,5 @@
 use std::io::{self, Read};
+use std::time::Duration;
 
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
@@ -15,6 +16,14 @@ use crate::jira::issue::{Account, Issue};
 const USER_AGENT: &str = concat!("jcli/", env!("CARGO_PKG_VERSION"));
 const ISSUE_FIELDS: &str = "summary,status,assignee,reporter,labels,description,attachment";
 pub(crate) const MAX_ATTACHMENT_METADATA_BYTES: usize = 16 * 1024 * 1024;
+/// Stops a connection attempt to an unreachable Jira endpoint early.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// reqwest's blocking client applies this timeout to sending the request and
+/// receiving the response headers, and then separately to each read call on
+/// a streamed body. It limits idle time, not total time: an attachment
+/// download keeps going as long as data keeps arriving, while a server that
+/// sends nothing for this long fails the request.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum JiraClientError {
@@ -78,16 +87,37 @@ pub struct JiraClient {
 
 impl JiraClient {
     pub fn new(config: &Config) -> Result<Self, JiraClientError> {
+        Self::build(config, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+    }
+
+    #[cfg(test)]
+    fn with_timeouts(
+        config: &Config,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self, JiraClientError> {
+        Self::build(config, connect_timeout, request_timeout)
+    }
+
+    fn build(
+        config: &Config,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Self, JiraClientError> {
         let http = Client::builder()
             .user_agent(USER_AGENT)
             .referer(false)
             .redirect(same_origin_redirect_policy())
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
             .build()
             .map_err(JiraClientError::http)?;
         let attachment_http = Client::builder()
             .user_agent(USER_AGENT)
             .referer(false)
             .redirect(Policy::none())
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
             .build()
             .map_err(JiraClientError::http)?;
         Ok(JiraClient {
@@ -292,6 +322,10 @@ mod tests {
     use super::*;
     use httpmock::Method::GET;
     use httpmock::MockServer;
+    use std::io::Write;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::thread;
+    use std::time::Instant;
 
     // base64 of "jane@example.com:secret-token"
     const AUTH_HEADER: &str = "Basic amFuZUBleGFtcGxlLmNvbTpzZWNyZXQtdG9rZW4=";
@@ -802,5 +836,167 @@ mod tests {
         assert!(!rendered.contains("content.example"));
         assert!(!rendered.contains("unsafe/id"));
         assert!(!rendered.contains('\u{1b}'));
+    }
+
+    /// Starts a raw TCP server for one connection. It reads the request and
+    /// hands the stream to `respond`. Callers that need to stall keep the
+    /// thread detached so the test finishes through the client timeout.
+    fn raw_server(respond: impl FnOnce(TcpStream) + Send + 'static) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            respond(stream);
+        });
+        addr
+    }
+
+    fn stalled_server() -> SocketAddr {
+        raw_server(|_stream| thread::sleep(Duration::from_secs(10)))
+    }
+
+    fn short_timeout_client(addr: SocketAddr, request_timeout: Duration) -> JiraClient {
+        JiraClient::with_timeouts(
+            &Config {
+                base_url: Url::parse(&format!("http://{addr}/")).unwrap(),
+                email: "jane@example.com".to_string(),
+                api_token: "secret-token".to_string(),
+            },
+            Duration::from_millis(50),
+            request_timeout,
+        )
+        .unwrap()
+    }
+
+    fn assert_io_timeout(error: &io::Error) {
+        let source = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+            .expect("the read error should wrap a reqwest error");
+        assert!(source.is_timeout(), "{source:?}");
+    }
+
+    #[test]
+    fn timeouts_match_the_documented_values() {
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_stalled_json_response_times_out() {
+        let client = short_timeout_client(stalled_server(), Duration::from_millis(400));
+
+        let started = Instant::now();
+        let error = client.myself().unwrap_err();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stalled response took {:?} to fail",
+            started.elapsed()
+        );
+        match error {
+            JiraClientError::Http { source } => assert!(source.is_timeout(), "{source:?}"),
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stalled_metadata_body_times_out() {
+        let addr = raw_server(|mut stream| {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n{\"fields\":")
+                .unwrap();
+            thread::sleep(Duration::from_secs(10));
+        });
+        let client = short_timeout_client(addr, Duration::from_millis(400));
+
+        let started = Instant::now();
+        let error = client.attachments(&"ABC-123".parse().unwrap()).unwrap_err();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stalled body took {:?} to fail",
+            started.elapsed()
+        );
+        match error {
+            JiraClientError::MetadataRead { source } => assert_io_timeout(&source),
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stalled_attachment_response_times_out() {
+        let client = short_timeout_client(stalled_server(), Duration::from_millis(400));
+
+        let started = Instant::now();
+        let error = client.attachment_content("id").unwrap_err();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stalled response took {:?} to fail",
+            started.elapsed()
+        );
+        match error {
+            JiraClientError::AttachmentHttp { source } => {
+                assert!(source.is_timeout(), "{source:?}");
+            }
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stalled_attachment_body_times_out() {
+        let addr = raw_server(|mut stream| {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabcd")
+                .unwrap();
+            thread::sleep(Duration::from_secs(10));
+        });
+        let client = short_timeout_client(addr, Duration::from_millis(400));
+        let mut response = client.attachment_content("id").unwrap();
+
+        let started = Instant::now();
+        let mut body = Vec::new();
+        let error = response.read_to_end(&mut body).unwrap_err();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stalled body took {:?} to fail",
+            started.elapsed()
+        );
+        assert_eq!(body, b"abcd");
+        assert_io_timeout(&error);
+    }
+
+    #[test]
+    fn attachment_downloads_may_outlast_the_request_timeout_while_data_arrives() {
+        // Eight one-byte chunks 150 ms apart take well over the 500 ms
+        // timeout in total, but no single read waits that long.
+        let request_timeout = Duration::from_millis(500);
+        let addr = raw_server(|mut stream| {
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n")
+                .unwrap();
+            for byte in b"abcdefgh" {
+                thread::sleep(Duration::from_millis(150));
+                stream.write_all(&[*byte]).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        let client = short_timeout_client(addr, request_timeout);
+
+        let started = Instant::now();
+        let mut response = client.attachment_content("id").unwrap();
+        let mut body = Vec::new();
+        response.read_to_end(&mut body).unwrap();
+
+        assert_eq!(body, b"abcdefgh");
+        assert!(
+            started.elapsed() > request_timeout,
+            "the download finished in {:?}, so it did not test the total time",
+            started.elapsed()
+        );
     }
 }
