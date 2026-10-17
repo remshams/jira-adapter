@@ -28,9 +28,10 @@ pub(crate) fn to_pretty_json<T: Serialize>(value: &T) -> String {
     rendered
 }
 
-/// Reduces untrusted text to one terminal-safe line: CR, LF, CRLF, and tabs
-/// become single spaces, while other control characters and bidi code
-/// points are dropped. Returns `fallback` when the value is missing or
+/// Reduces untrusted text to one terminal-safe line: CR, LF, CRLF, tabs,
+/// and the Unicode line and paragraph separators (U+2028, U+2029) become
+/// single spaces, while other control characters and bidi code points are
+/// dropped. Returns `fallback` when the value is missing or
 /// nothing visible remains.
 pub(crate) fn terminal_field(value: Option<&str>, fallback: &str) -> String {
     let sanitized = value.map(sanitize_terminal_text).unwrap_or_default();
@@ -41,13 +42,13 @@ pub(crate) fn terminal_field(value: Option<&str>, fallback: &str) -> String {
     }
 }
 
-/// Folds line breaks and tabs into spaces and drops control and
-/// bidirectional formatting characters.
+/// Folds line breaks, tabs, and the Unicode line and paragraph separators
+/// into spaces and drops control and bidirectional formatting characters.
 fn sanitize_terminal_text(value: &str) -> String {
     let mut sanitized = String::with_capacity(value.len());
     for character in value.replace("\r\n", "\n").chars() {
         match character {
-            '\r' | '\n' | '\t' => sanitized.push(' '),
+            '\r' | '\n' | '\t' | '\u{2028}' | '\u{2029}' => sanitized.push(' '),
             character if is_unsafe_terminal_character(character) => {}
             character => sanitized.push(character),
         }
@@ -107,5 +108,17 @@ mod tests {
             "ab"
         );
         assert_eq!(terminal_field(Some("a\rb"), "fallback"), "a b");
+    }
+
+    #[test]
+    fn terminal_fields_turn_unicode_line_separators_into_spaces() {
+        assert_eq!(
+            terminal_field(Some("bad\u{2028}error: forged\u{2029}x"), "fallback"),
+            "bad error: forged x"
+        );
+        assert_eq!(
+            terminal_field(Some("\u{2028}\u{2029}"), "fallback"),
+            "fallback"
+        );
     }
 }
