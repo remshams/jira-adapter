@@ -6,9 +6,21 @@ use crate::jira::issue::{Account, AdfDocument, AdfMark, AdfNode, Issue};
 pub fn render_issue(issue: &Issue) -> String {
     let key = escape_metadata(&issue.key);
     let summary = escape_metadata(&issue.fields.summary);
+    let issue_type = issue
+        .fields
+        .issue_type
+        .as_ref()
+        .and_then(|issue_type| nonempty_metadata(&issue_type.name))
+        .unwrap_or_else(|| "Unknown".to_string());
     let status = escape_metadata(&issue.fields.status.name);
     let assignee = account_name(issue.fields.assignee.as_ref(), "Unassigned");
     let reporter = account_name(issue.fields.reporter.as_ref(), "Unknown");
+    let created = issue
+        .fields
+        .created
+        .as_deref()
+        .and_then(timestamp_metadata)
+        .unwrap_or_else(|| "Unknown".to_string());
     let labels = issue
         .fields
         .labels
@@ -31,7 +43,7 @@ pub fn render_issue(issue: &Issue) -> String {
         .unwrap_or_else(|| "No description.".to_string());
 
     format!(
-        "# {key}: {summary}\n\n- Status: {status}\n- Assignee: {assignee}\n- Reporter: {reporter}\n- Labels: {labels}\n- Attachments: {attachment_count}\n\n## Description\n\n{}\n",
+        "# {key}: {summary}\n\n- Type: {issue_type}\n- Status: {status}\n- Assignee: {assignee}\n- Reporter: {reporter}\n- Created: {created}\n- Labels: {labels}\n- Attachments: {attachment_count}\n\n## Description\n\n{}\n",
         description.trim_matches('\n')
     )
 }
@@ -447,6 +459,22 @@ fn nonempty_metadata(text: &str) -> Option<String> {
     }
 }
 
+/// Renders a Jira timestamp as returned. Well-formed timestamps hold only
+/// digits and `-:.+TZ`, none of which can start Markdown structure in the
+/// middle of a line, so they skip escaping that would turn `+0200` into
+/// `\+0200`. Any other value goes through the usual metadata escaping.
+fn timestamp_metadata(text: &str) -> Option<String> {
+    let is_plain_timestamp = !text.is_empty()
+        && text
+            .chars()
+            .all(|character| character.is_ascii_digit() || "-:.+TZ".contains(character));
+    if is_plain_timestamp {
+        Some(text.to_string())
+    } else {
+        nonempty_metadata(text)
+    }
+}
+
 fn escape_markdown(text: &str, escape_hyphen: bool) -> String {
     let mut escaped = String::new();
     for character in text.chars() {
@@ -623,12 +651,15 @@ mod tests {
     }
 
     fn issue(description: Option<AdfDocument>) -> Issue {
-        use crate::jira::issue::{IssueFields, Status};
+        use crate::jira::issue::{IssueFields, IssueType, Status};
 
         Issue {
             key: "ABC-123".to_string(),
             fields: IssueFields {
                 summary: "Fix the thing".to_string(),
+                issue_type: Some(IssueType {
+                    name: "Bug".to_string(),
+                }),
                 status: Status {
                     name: "In Progress".to_string(),
                 },
@@ -639,6 +670,7 @@ mod tests {
                     email_address: Some("jane@example.com".to_string()),
                 }),
                 labels: vec!["backend".to_string(), "urgent".to_string()],
+                created: Some("2026-10-17T02:13:45.123+0200".to_string()),
                 description,
                 attachment: Vec::new(),
             },
@@ -1139,7 +1171,7 @@ mod tests {
         let output = render_issue(&issue);
 
         assert!(output.contains(
-            "- Assignee: Unknown\n- Reporter: Unknown\n- Labels: None\n- Attachments: 0\n"
+            "- Type: Unknown\n- Status: Open\n- Assignee: Unknown\n- Reporter: Unknown\n- Created: Unknown\n- Labels: None\n- Attachments: 0\n"
         ));
         assert!(!output.contains("secret-id"));
         assert!(!output.contains("secret@example.com"));
@@ -1208,7 +1240,7 @@ mod tests {
         let output = render_issue(&issue);
 
         assert!(output.contains(
-            "- Assignee: Unknown\n- Reporter: Unknown\n- Labels: kept\n- Attachments: 0\n"
+            "- Assignee: Unknown\n- Reporter: Unknown\n- Created: Unknown\n- Labels: kept\n- Attachments: 0\n"
         ));
     }
 
@@ -1238,7 +1270,62 @@ mod tests {
 
         assert_eq!(
             render_issue(&issue(Some(description))),
-            "# ABC-123: Fix the thing\n\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Labels: backend, urgent\n- Attachments: 0\n\n## Description\n\nRendered description.\n"
+            "# ABC-123: Fix the thing\n\n- Type: Bug\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Created: 2026-10-17T02:13:45.123+0200\n- Labels: backend, urgent\n- Attachments: 0\n\n## Description\n\nRendered description.\n"
         );
+    }
+
+    #[test]
+    fn issue_type_and_created_fall_back_when_missing_or_empty() {
+        let issue: Issue = serde_json::from_value(json!({
+            "key": "ABC-123",
+            "fields": {
+                "summary": "Summary",
+                "issuetype": {"name": "\u{1b}\r\n"},
+                "status": {"name": "Open"},
+                "created": "",
+                "description": null
+            }
+        }))
+        .unwrap();
+
+        assert!(render_issue(&issue).contains("- Type: Unknown\n"));
+        assert!(render_issue(&issue).contains("- Created: Unknown\n"));
+    }
+
+    #[test]
+    fn created_timestamps_render_verbatim() {
+        for created in [
+            "2026-10-17T02:13:45.123+0200",
+            "2026-10-17T00:13:45Z",
+            "2026-10-17T02:13:45.123-0330",
+        ] {
+            let mut issue = issue(None);
+            issue.fields.created = Some(created.to_string());
+
+            assert!(
+                render_issue(&issue).contains(&format!("\n- Created: {created}\n")),
+                "{created}"
+            );
+        }
+    }
+
+    #[test]
+    fn unusual_created_values_and_issue_types_are_escaped_and_single_line() {
+        let issue: Issue = serde_json::from_value(json!({
+            "key": "ABC-123",
+            "fields": {
+                "summary": "Summary",
+                "issuetype": {"name": "[Bug](x)\n# forged"},
+                "status": {"name": "Open"},
+                "created": "2026-10-17 *today*\u{1b}[31m\n# forged",
+                "description": null
+            }
+        }))
+        .unwrap();
+        let output = render_issue(&issue);
+
+        assert!(output.contains("- Type: \\[Bug\\]\\(x\\) \\# forged\n"));
+        assert!(output.contains("- Created: 2026-10-17 \\*today\\*\\[31m \\# forged\n"));
+        assert!(!output.contains('\u{1b}'));
     }
 }

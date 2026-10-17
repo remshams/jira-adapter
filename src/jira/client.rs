@@ -14,7 +14,8 @@ use crate::jira::attachment::{Attachment, AttachmentIssue, MAX_ATTACHMENT_ID_BYT
 use crate::jira::issue::{Account, Issue};
 
 const USER_AGENT: &str = concat!("jcli/", env!("CARGO_PKG_VERSION"));
-const ISSUE_FIELDS: &str = "summary,status,assignee,reporter,labels,description,attachment";
+const ISSUE_FIELDS: &str =
+    "summary,issuetype,status,assignee,reporter,labels,created,description,attachment";
 pub(crate) const MAX_ATTACHMENT_METADATA_BYTES: usize = 16 * 1024 * 1024;
 /// Stops a connection attempt to an unreachable Jira endpoint early.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -386,6 +387,7 @@ mod tests {
                 "key": "ABC-123",
                 "fields": {
                     "summary": "Fix the thing",
+                    "issuetype": {"name": "Bug"},
                     "status": {"name": "In Progress"},
                     "assignee": null,
                     "reporter": {
@@ -394,6 +396,7 @@ mod tests {
                         "emailAddress": null
                     },
                     "labels": ["backend", "urgent"],
+                    "created": "2026-10-17T02:13:45.123+0200",
                     "description": {
                         "version": 1,
                         "type": "doc",
@@ -417,10 +420,15 @@ mod tests {
         mock.assert_calls(1);
         assert_eq!(issue.key, "ABC-123");
         assert_eq!(issue.fields.summary, "Fix the thing");
+        assert_eq!(issue.fields.issue_type.unwrap().name, "Bug");
         assert_eq!(issue.fields.status.name, "In Progress");
         assert!(issue.fields.assignee.is_none());
         assert_eq!(issue.fields.reporter.as_ref().unwrap().email_address, None);
         assert_eq!(issue.fields.labels, ["backend", "urgent"]);
+        assert_eq!(
+            issue.fields.created.as_deref(),
+            Some("2026-10-17T02:13:45.123+0200")
+        );
         assert_eq!(issue.fields.attachment.len(), 1);
         assert_eq!(issue.fields.attachment[0].id, "opaque-id");
         let description = issue.fields.description.unwrap();

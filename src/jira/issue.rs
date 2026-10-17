@@ -21,14 +21,23 @@ pub struct Issue {
 #[derive(Debug, Clone, Deserialize)]
 pub struct IssueFields {
     pub summary: String,
+    #[serde(rename = "issuetype")]
+    pub issue_type: Option<IssueType>,
     pub status: Status,
     pub assignee: Option<Account>,
     pub reporter: Option<Account>,
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Jira's creation timestamp, kept exactly as returned.
+    pub created: Option<String>,
     pub description: Option<AdfDocument>,
     #[serde(default)]
     pub attachment: Vec<Attachment>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IssueType {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,18 +91,42 @@ mod tests {
             "key": "ABC-123",
             "fields": {
                 "summary": "Summary",
+                "issuetype": null,
                 "status": {"name": "Open"},
                 "assignee": null,
                 "reporter": null,
                 "labels": [],
+                "created": null,
                 "description": null,
                 "attachment": []
             }
         }))
         .unwrap();
 
+        assert!(issue.fields.issue_type.is_none());
         assert!(issue.fields.reporter.is_none());
+        assert!(issue.fields.created.is_none());
         assert!(issue.fields.description.is_none());
+    }
+
+    #[test]
+    fn parses_issue_type_and_keeps_the_created_timestamp_verbatim() {
+        let issue: Issue = serde_json::from_value(serde_json::json!({
+            "key": "ABC-123",
+            "fields": {
+                "summary": "Summary",
+                "issuetype": {"name": "Bug", "subtask": false, "iconUrl": "https://ignored"},
+                "status": {"name": "Open"},
+                "created": "2026-10-17T02:13:45.123+0200"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(issue.fields.issue_type.unwrap().name, "Bug");
+        assert_eq!(
+            issue.fields.created.as_deref(),
+            Some("2026-10-17T02:13:45.123+0200")
+        );
     }
 
     #[test]
@@ -149,6 +182,8 @@ mod tests {
         .unwrap();
 
         assert!(issue.fields.labels.is_empty());
+        assert!(issue.fields.issue_type.is_none());
+        assert!(issue.fields.created.is_none());
         assert!(
             issue
                 .fields

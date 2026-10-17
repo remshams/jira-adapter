@@ -7,7 +7,8 @@ use std::process::Output;
 
 // base64 of "cli@example.com:cli-test-token"
 const AUTH_HEADER: &str = "Basic Y2xpQGV4YW1wbGUuY29tOmNsaS10ZXN0LXRva2Vu";
-const FIELDS: &str = "summary,status,assignee,reporter,labels,description,attachment";
+const FIELDS: &str =
+    "summary,issuetype,status,assignee,reporter,labels,created,description,attachment";
 
 fn run(server: &MockServer) -> Output {
     jcli(
@@ -33,6 +34,7 @@ fn reads_an_issue_with_exact_request_and_output() {
             "key": "ABC-123",
             "fields": {
                 "summary": "Fix the thing",
+                "issuetype": {"name": "Bug"},
                 "status": {"name": "In Progress"},
                 "assignee": null,
                 "reporter": {
@@ -41,6 +43,7 @@ fn reads_an_issue_with_exact_request_and_output() {
                     "emailAddress": "jane@example.com"
                 },
                 "labels": ["backend", "urgent"],
+                "created": "2026-10-17T02:13:45.123+0200",
                 "description": {
                     "version": 1,
                     "type": "doc",
@@ -64,7 +67,7 @@ fn reads_an_issue_with_exact_request_and_output() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "# ABC-123: Fix the thing\n\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Labels: backend, urgent\n- Attachments: 1\n\n## Description\n\nRendered description.\n"
+        "# ABC-123: Fix the thing\n\n- Type: Bug\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Created: 2026-10-17T02:13:45.123+0200\n- Labels: backend, urgent\n- Attachments: 1\n\n## Description\n\nRendered description.\n"
     );
     assert!(output.stderr.is_empty());
 }
