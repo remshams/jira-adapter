@@ -111,17 +111,22 @@ pub fn download_all(
     }
 
     let plans = plan_downloads(metadata)?;
-    if plans.is_empty() {
-        return Ok(DownloadManifest { names: Vec::new() });
+    if !plans.is_empty() {
+        prepare_output_directory(output_directory)?;
     }
+    download_planned(source, plans, output_directory)
+}
 
-    prepare_output_directory(output_directory)?;
+fn download_planned(
+    source: &impl ContentSource,
+    plans: Vec<PlannedAttachment>,
+    output_directory: &Path,
+) -> Result<DownloadManifest, AttachmentError> {
     let mut names = Vec::with_capacity(plans.len());
     for plan in plans {
         download_one(source, &plan, output_directory)?;
         names.push(plan.name);
     }
-
     Ok(DownloadManifest { names })
 }
 
@@ -185,34 +190,58 @@ fn plan_downloads(metadata: &[Attachment]) -> Result<Vec<PlannedAttachment>, Att
     let mut total_size = 0_u64;
 
     for attachment in metadata {
-        if attachment.id.is_empty()
-            || attachment.id.len() > MAX_ATTACHMENT_ID_BYTES
-            || matches!(attachment.id.as_str(), "." | "..")
-        {
-            return Err(AttachmentError::InvalidId);
-        }
-        if !ids.insert(attachment.id.as_str()) {
-            return Err(AttachmentError::DuplicateId);
-        }
-        let size = u64::try_from(attachment.size).map_err(|_| AttachmentError::InvalidSize)?;
-        if size > MAX_ATTACHMENT_SIZE_BYTES {
-            return Err(AttachmentError::AttachmentSizeLimit);
-        }
-        total_size = total_size
-            .checked_add(size)
-            .ok_or(AttachmentError::AggregateSizeLimit)?;
-        if total_size > MAX_TOTAL_ATTACHMENT_SIZE_BYTES {
-            return Err(AttachmentError::AggregateSizeLimit);
-        }
-        plans.push(PlannedAttachment {
-            id: attachment.id.clone(),
-            size,
-            name: generated_name(&attachment.id, &attachment.filename),
-        });
+        let plan = plan_download(attachment, &mut ids)?;
+        total_size = add_to_total_size(total_size, plan.size)?;
+        plans.push(plan);
     }
 
     detect_name_collisions(&plans)?;
     Ok(plans)
+}
+
+/// Validates one attachment and records its ID in `ids`, which rejects IDs
+/// already seen earlier in the response.
+fn plan_download<'a>(
+    attachment: &'a Attachment,
+    ids: &mut HashSet<&'a str>,
+) -> Result<PlannedAttachment, AttachmentError> {
+    validate_id(&attachment.id)?;
+    if !ids.insert(attachment.id.as_str()) {
+        return Err(AttachmentError::DuplicateId);
+    }
+    Ok(PlannedAttachment {
+        id: attachment.id.clone(),
+        size: attachment_size(attachment.size)?,
+        name: generated_name(&attachment.id, &attachment.filename),
+    })
+}
+
+fn validate_id(id: &str) -> Result<(), AttachmentError> {
+    if id.is_empty() || id.len() > MAX_ATTACHMENT_ID_BYTES || matches!(id, "." | "..") {
+        Err(AttachmentError::InvalidId)
+    } else {
+        Ok(())
+    }
+}
+
+fn attachment_size(size: i64) -> Result<u64, AttachmentError> {
+    let size = u64::try_from(size).map_err(|_| AttachmentError::InvalidSize)?;
+    if size > MAX_ATTACHMENT_SIZE_BYTES {
+        Err(AttachmentError::AttachmentSizeLimit)
+    } else {
+        Ok(size)
+    }
+}
+
+fn add_to_total_size(total_size: u64, size: u64) -> Result<u64, AttachmentError> {
+    let total_size = total_size
+        .checked_add(size)
+        .ok_or(AttachmentError::AggregateSizeLimit)?;
+    if total_size > MAX_TOTAL_ATTACHMENT_SIZE_BYTES {
+        Err(AttachmentError::AggregateSizeLimit)
+    } else {
+        Ok(total_size)
+    }
 }
 
 fn detect_name_collisions(plans: &[PlannedAttachment]) -> Result<(), AttachmentError> {
@@ -244,23 +273,33 @@ fn copy_exact_size(
             .read(&mut buffer[..read_limit])
             .map_err(|_| AttachmentError::SourceRead)?;
         let Some(count) = std::num::NonZeroUsize::new(count) else {
-            return if copied == expected {
-                Ok(())
-            } else {
-                Err(AttachmentError::SizeMismatch)
-            };
+            return finish_copy(copied, expected);
         };
         let count = count.get();
 
-        copied = copied
-            .checked_add(count as u64)
-            .ok_or(AttachmentError::SizeMismatch)?;
-        if copied > expected {
-            return Err(AttachmentError::SizeMismatch);
-        }
+        copied = add_copied(copied, count, expected)?;
         destination
             .write_all(&buffer[..count])
             .map_err(AttachmentError::filesystem)?;
+    }
+}
+
+fn finish_copy(copied: u64, expected: u64) -> Result<(), AttachmentError> {
+    if copied == expected {
+        Ok(())
+    } else {
+        Err(AttachmentError::SizeMismatch)
+    }
+}
+
+fn add_copied(copied: u64, count: usize, expected: u64) -> Result<u64, AttachmentError> {
+    let copied = copied
+        .checked_add(count as u64)
+        .ok_or(AttachmentError::SizeMismatch)?;
+    if copied > expected {
+        Err(AttachmentError::SizeMismatch)
+    } else {
+        Ok(copied)
     }
 }
 
@@ -299,47 +338,71 @@ fn append_hex(output: &mut String, bytes: &[u8]) {
 }
 
 fn sanitized_filename(filename: &str, max_bytes: usize) -> String {
-    let mut sanitized = String::with_capacity(filename.len().min(max_bytes));
+    let collapsed = collapse_filename(filename, max_bytes);
+    let sanitized = collapsed.trim_matches(['.', '-']);
+
+    if sanitized.is_empty() {
+        return FALLBACK_FILENAME[..FALLBACK_FILENAME.len().min(max_bytes)].to_string();
+    }
+    if is_windows_reserved_name(sanitized) {
+        return prefix_reserved_name(sanitized, max_bytes);
+    }
+    sanitized.to_string()
+}
+
+/// Keeps ASCII letters, digits, `.`, and `-`, collapsing every run of other
+/// characters between kept ones into a single `-`, within `max_bytes`.
+fn collapse_filename(filename: &str, max_bytes: usize) -> String {
+    let mut collapsed = String::with_capacity(filename.len().min(max_bytes));
     let mut pending_separator = false;
 
     for character in filename.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '.' | '-') {
-            if pending_separator && !sanitized.is_empty() && sanitized.len() < max_bytes {
-                sanitized.push('-');
-            }
-            pending_separator = false;
-            if sanitized.len() == max_bytes {
-                break;
-            }
-            sanitized.push(character);
-        } else {
+        if !is_kept_filename_character(character) {
             pending_separator = true;
+            continue;
         }
-    }
-
-    while sanitized.ends_with(['.', '-']) {
-        sanitized.pop();
-    }
-    while sanitized.starts_with(['.', '-']) {
-        sanitized.remove(0);
-    }
-
-    if sanitized.is_empty() || matches!(sanitized.as_str(), "." | "..") {
-        return FALLBACK_FILENAME[..FALLBACK_FILENAME.len().min(max_bytes)].to_string();
-    }
-
-    if is_windows_reserved_name(&sanitized) {
-        let prefix = "file-";
-        let Some(remaining) = max_bytes.checked_sub(prefix.len()) else {
-            return prefix[..max_bytes].to_string();
-        };
-        if sanitized.len() <= remaining {
-            sanitized.insert_str(0, prefix);
-        } else {
-            sanitized.replace_range(..prefix.len().min(sanitized.len()), prefix);
+        if !push_within_limit(&mut collapsed, character, pending_separator, max_bytes) {
+            break;
         }
+        pending_separator = false;
     }
-    sanitized
+    collapsed
+}
+
+fn is_kept_filename_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '.' | '-')
+}
+
+/// Pushes `character`, preceded by a `-` when `separate` is set and the
+/// output is not empty. Returns `false` once the output is full.
+fn push_within_limit(
+    output: &mut String,
+    character: char,
+    separate: bool,
+    max_bytes: usize,
+) -> bool {
+    if separate && !output.is_empty() && output.len() < max_bytes {
+        output.push('-');
+    }
+    if output.len() == max_bytes {
+        return false;
+    }
+    output.push(character);
+    true
+}
+
+fn prefix_reserved_name(name: &str, max_bytes: usize) -> String {
+    let prefix = "file-";
+    let Some(remaining) = max_bytes.checked_sub(prefix.len()) else {
+        return prefix[..max_bytes].to_string();
+    };
+    let mut prefixed = name.to_string();
+    if prefixed.len() <= remaining {
+        prefixed.insert_str(0, prefix);
+    } else {
+        prefixed.replace_range(..prefix.len().min(prefixed.len()), prefix);
+    }
+    prefixed
 }
 
 fn is_windows_reserved_name(filename: &str) -> bool {
