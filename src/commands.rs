@@ -6,6 +6,7 @@ use crate::attachments;
 use crate::config;
 use crate::issue_key::IssueKey;
 use crate::jira::client::JiraClient;
+use crate::output::terminal_field;
 use crate::xray::client::XrayClient;
 use crate::xray::test_runs::{TestRunSortDirection, TestRunSortField, TestRunsOutput, sort_page};
 
@@ -107,41 +108,6 @@ fn write_stdout(output: &str) -> ! {
     std::process::exit(0);
 }
 
-fn terminal_field(value: Option<&str>, fallback: &str) -> String {
-    let sanitized = value.map(sanitize_terminal_text).unwrap_or_default();
-    if sanitized.trim().is_empty() {
-        fallback.to_string()
-    } else {
-        sanitized
-    }
-}
-
-/// Folds line breaks and tabs into spaces and drops control and
-/// bidirectional formatting characters.
-fn sanitize_terminal_text(value: &str) -> String {
-    let mut sanitized = String::with_capacity(value.len());
-    for character in value.replace("\r\n", "\n").chars() {
-        match character {
-            '\r' | '\n' | '\t' => sanitized.push(' '),
-            character if is_unsafe_terminal_character(character) => {}
-            character => sanitized.push(character),
-        }
-    }
-    sanitized
-}
-
-fn is_unsafe_terminal_character(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
-}
-
 fn or_exit<T>(result: Result<T, impl std::fmt::Display>, code: i32) -> T {
     match result {
         Ok(value) => value,
@@ -152,19 +118,4 @@ fn or_exit<T>(result: Result<T, impl std::fmt::Display>, code: i32) -> T {
 fn exit(code: i32, error: impl std::fmt::Display) -> ! {
     eprintln!("error: {error}");
     std::process::exit(code);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::terminal_field;
-
-    #[test]
-    fn terminal_fields_are_single_line_and_control_free() {
-        assert_eq!(
-            terminal_field(Some("Jane\r\nDoe\t\u{1b}[31m\u{202e}"), "fallback"),
-            "Jane Doe [31m"
-        );
-        assert_eq!(terminal_field(Some("\u{1b}\u{7}"), "fallback"), "fallback");
-        assert_eq!(terminal_field(None, "fallback"), "fallback");
-    }
 }

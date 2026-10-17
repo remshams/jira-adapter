@@ -28,6 +28,37 @@ pub(crate) fn to_pretty_json<T: Serialize>(value: &T) -> String {
     rendered
 }
 
+/// Reduces untrusted text to one terminal-safe line: CR, LF, CRLF, and tabs
+/// become single spaces, while other control characters and bidi code
+/// points are dropped. Returns `fallback` when the value is missing or
+/// nothing visible remains.
+pub(crate) fn terminal_field(value: Option<&str>, fallback: &str) -> String {
+    let sanitized = value.map(sanitize_terminal_text).unwrap_or_default();
+    if sanitized.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Folds line breaks and tabs into spaces and drops control and
+/// bidirectional formatting characters.
+fn sanitize_terminal_text(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    for character in value.replace("\r\n", "\n").chars() {
+        match character {
+            '\r' | '\n' | '\t' => sanitized.push(' '),
+            character if is_unsafe_terminal_character(character) => {}
+            character => sanitized.push(character),
+        }
+    }
+    sanitized
+}
+
+fn is_unsafe_terminal_character(character: char) -> bool {
+    character.is_control() || BIDI_CODE_POINTS.contains(&character)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +84,28 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(parsed["text"], text);
+    }
+
+    #[test]
+    fn terminal_fields_are_single_line_and_control_free() {
+        assert_eq!(
+            terminal_field(Some("Jane\r\nDoe\t\u{1b}[31m\u{202e}"), "fallback"),
+            "Jane Doe [31m"
+        );
+        assert_eq!(terminal_field(Some("\u{1b}\u{7}"), "fallback"), "fallback");
+        assert_eq!(terminal_field(None, "fallback"), "fallback");
+    }
+
+    #[test]
+    fn terminal_fields_drop_every_bidi_code_point_and_c1_control() {
+        let value: String = BIDI_CODE_POINTS
+            .iter()
+            .chain(['\u{9b}', '\u{7f}'].iter())
+            .collect();
+        assert_eq!(
+            terminal_field(Some(&format!("a{value}b")), "fallback"),
+            "ab"
+        );
+        assert_eq!(terminal_field(Some("a\rb"), "fallback"), "a b");
     }
 }
