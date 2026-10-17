@@ -765,15 +765,16 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0u8; 1024];
             let _ = stream.read(&mut request);
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
-                .unwrap();
+            let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
             for _ in 0..4 {
-                stream.write_all(b"40\r\n").unwrap();
-                stream.write_all(&[b'a'; 64]).unwrap();
-                stream.write_all(b"\r\n").unwrap();
+                response.extend_from_slice(b"40\r\n");
+                response.extend_from_slice(&[b'a'; 64]);
+                response.extend_from_slice(b"\r\n");
             }
-            stream.write_all(b"0\r\n\r\n").unwrap();
+            response.extend_from_slice(b"0\r\n\r\n");
+            // The client hangs up once it passes the limit, so a write into
+            // the closed socket is expected and must not fail the test.
+            let _ = stream.write_all(&response);
         });
 
         let response = Client::builder()
