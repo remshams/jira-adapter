@@ -137,9 +137,7 @@ impl JiraClient {
     /// The attachment ID is appended as one encoded path segment. Jira-provided
     /// resource URLs are never accepted here.
     pub fn attachment_content(&self, id: &str) -> Result<Response, JiraClientError> {
-        if id.is_empty() || id.len() > MAX_ATTACHMENT_ID_BYTES || matches!(id, "." | "..") {
-            return Err(JiraClientError::InvalidAttachmentId);
-        }
+        validate_attachment_id(id)?;
         let mut url = self.endpoint_url(&["rest", "api", "3", "attachment", "content", id])?;
         url.query_pairs_mut().append_pair("redirect", "false");
 
@@ -153,16 +151,9 @@ impl JiraClient {
         if status == StatusCode::OK {
             return Ok(response);
         }
-
-        Err(match status {
-            StatusCode::UNAUTHORIZED => JiraClientError::Unauthorized,
-            StatusCode::FORBIDDEN => JiraClientError::Forbidden,
-            StatusCode::NOT_FOUND => JiraClientError::NotFound("attachment content"),
-            StatusCode::TOO_MANY_REQUESTS => JiraClientError::RateLimited,
-            other => JiraClientError::AttachmentStatus {
-                status: other.as_u16(),
-            },
-        })
+        Err(status_error(status, "attachment content", |status| {
+            JiraClientError::AttachmentStatus { status }
+        }))
     }
 
     fn endpoint_url(&self, segments: &[&str]) -> Result<Url, JiraClientError> {
@@ -213,16 +204,9 @@ impl JiraClient {
         if status.is_success() {
             return Ok(response);
         }
-
-        Err(match status {
-            StatusCode::UNAUTHORIZED => JiraClientError::Unauthorized,
-            StatusCode::FORBIDDEN => JiraClientError::Forbidden,
-            StatusCode::NOT_FOUND => JiraClientError::NotFound(error_resource),
-            StatusCode::TOO_MANY_REQUESTS => JiraClientError::RateLimited,
-            other => JiraClientError::Api {
-                status: other.as_u16(),
-            },
-        })
+        Err(status_error(status, error_resource, |status| {
+            JiraClientError::Api { status }
+        }))
     }
 
     fn authenticated_get(&self, url: Url) -> Result<Response, JiraClientError> {
@@ -231,6 +215,30 @@ impl JiraClient {
             .basic_auth(&self.email, Some(&self.api_token))
             .send()
             .map_err(JiraClientError::http)
+    }
+}
+
+fn validate_attachment_id(id: &str) -> Result<(), JiraClientError> {
+    if id.is_empty() || id.len() > MAX_ATTACHMENT_ID_BYTES || matches!(id, "." | "..") {
+        Err(JiraClientError::InvalidAttachmentId)
+    } else {
+        Ok(())
+    }
+}
+
+/// Maps the failure statuses shared by all Jira endpoints. `NotFound` names
+/// `resource`, and any other status becomes the error built by `other`.
+fn status_error(
+    status: StatusCode,
+    resource: &'static str,
+    other: fn(u16) -> JiraClientError,
+) -> JiraClientError {
+    match status {
+        StatusCode::UNAUTHORIZED => JiraClientError::Unauthorized,
+        StatusCode::FORBIDDEN => JiraClientError::Forbidden,
+        StatusCode::NOT_FOUND => JiraClientError::NotFound(resource),
+        StatusCode::TOO_MANY_REQUESTS => JiraClientError::RateLimited,
+        status => other(status.as_u16()),
     }
 }
 
