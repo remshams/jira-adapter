@@ -35,9 +35,11 @@ pub struct IssueFields {
     pub attachment: Vec<Attachment>,
 }
 
+/// Jira can return an issue type object without a usable name, which
+/// renders as unknown.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IssueType {
-    pub name: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,11 +124,31 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(issue.fields.issue_type.unwrap().name, "Bug");
+        assert_eq!(
+            issue.fields.issue_type.unwrap().name.as_deref(),
+            Some("Bug")
+        );
         assert_eq!(
             issue.fields.created.as_deref(),
             Some("2026-10-17T02:13:45.123+0200")
         );
+    }
+
+    #[test]
+    fn parses_issue_types_with_a_missing_or_null_name() {
+        for issue_type in [serde_json::json!({}), serde_json::json!({"name": null})] {
+            let issue: Issue = serde_json::from_value(serde_json::json!({
+                "key": "ABC-123",
+                "fields": {
+                    "summary": "Summary",
+                    "issuetype": issue_type,
+                    "status": {"name": "Open"}
+                }
+            }))
+            .unwrap();
+
+            assert!(issue.fields.issue_type.unwrap().name.is_none());
+        }
     }
 
     #[test]

@@ -493,7 +493,10 @@ mod tests {
         mock.assert_calls(1);
         assert_eq!(issue.key, "ABC-123");
         assert_eq!(issue.fields.summary, "Fix the thing");
-        assert_eq!(issue.fields.issue_type.unwrap().name, "Bug");
+        assert_eq!(
+            issue.fields.issue_type.unwrap().name.as_deref(),
+            Some("Bug")
+        );
         assert_eq!(issue.fields.status.name, "In Progress");
         assert!(issue.fields.assignee.is_none());
         assert_eq!(issue.fields.reporter.as_ref().unwrap().email_address, None);
