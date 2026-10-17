@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::time::Duration;
 
@@ -12,11 +13,16 @@ use crate::config::Config;
 use crate::issue_key::IssueKey;
 use crate::jira::attachment::{Attachment, AttachmentIssue, MAX_ATTACHMENT_ID_BYTES};
 use crate::jira::issue::{Account, Issue};
+use crate::jira::search::SearchPage;
+use crate::output::terminal_field;
 
 const USER_AGENT: &str = concat!("jcli/", env!("CARGO_PKG_VERSION"));
 const ISSUE_FIELDS: &str =
     "summary,issuetype,status,assignee,reporter,labels,created,description,attachment";
+const SEARCH_FIELDS: &str = "summary,status,issuetype,created,updated,labels";
 pub(crate) const MAX_ATTACHMENT_METADATA_BYTES: usize = 16 * 1024 * 1024;
+/// Jira error bodies are short JSON documents; anything larger is not one.
+const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
 /// Stops a connection attempt to an unreachable Jira endpoint early.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// reqwest's blocking client applies this timeout to sending the request and
@@ -64,6 +70,8 @@ pub enum JiraClientError {
     RateLimited,
     #[error("Jira API error (HTTP {status})")]
     Api { status: u16 },
+    #[error("invalid JQL query (400): {0}")]
+    InvalidJql(String),
     #[error("attachment download failed (HTTP {status})")]
     AttachmentStatus { status: u16 },
 }
@@ -156,6 +164,26 @@ impl JiraClient {
         Ok(issue.id)
     }
 
+    /// Runs a JQL search and returns only the first page of at most `limit`
+    /// issues. The query is passed to Jira unchanged. A 400 response carries
+    /// Jira's explanation of the rejected query; see [`invalid_query_error`].
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "called by the issue search command")
+    )]
+    pub fn search_issues(&self, jql: &str, limit: u32) -> Result<SearchPage, JiraClientError> {
+        let mut url = self.endpoint_url(&["rest", "api", "3", "search", "jql"])?;
+        url.query_pairs_mut()
+            .append_pair("jql", jql)
+            .append_pair("maxResults", &limit.to_string())
+            .append_pair("fields", SEARCH_FIELDS);
+        let response = self.authenticated_get(url)?;
+        if response.status() == StatusCode::BAD_REQUEST {
+            return Err(invalid_query_error(response));
+        }
+        Self::bounded_metadata_json(response, "issue search")
+    }
+
     pub fn attachments(&self, issue_key: &IssueKey) -> Result<Vec<Attachment>, JiraClientError> {
         let mut url = self.endpoint_url(&["rest", "api", "3", "issue", issue_key.as_str()])?;
         url.query_pairs_mut().append_pair("fields", "attachment");
@@ -218,12 +246,19 @@ impl JiraClient {
         error_resource: &'static str,
     ) -> Result<T, JiraClientError> {
         let response = self.authenticated_get(url)?;
+        Self::bounded_metadata_json(response, error_resource)
+    }
+
+    fn bounded_metadata_json<T: DeserializeOwned>(
+        response: Response,
+        error_resource: &'static str,
+    ) -> Result<T, JiraClientError> {
         let response = Self::check_json_response(response, error_resource)?;
         if content_length_exceeds(response.content_length(), MAX_ATTACHMENT_METADATA_BYTES) {
             return Err(JiraClientError::MetadataTooLarge);
         }
 
-        let body = read_bounded_metadata_body(response)?;
+        let body = read_bounded_body(response, MAX_ATTACHMENT_METADATA_BYTES)?;
         serde_json::from_slice(&body).map_err(|source| JiraClientError::MetadataJson { source })
     }
 
@@ -279,6 +314,48 @@ struct MinimalIssue {
     id: String,
 }
 
+/// Jira's error body: general messages plus messages keyed by field.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ErrorCollection {
+    error_messages: Option<Vec<String>>,
+    errors: Option<BTreeMap<String, String>>,
+}
+
+/// Maps a 400 from the search endpoint. Jira explains a rejected JQL query
+/// in the error body; its messages are joined into one terminal-safe line
+/// so an agent can fix the query. A body that is too large, unreadable, not
+/// an error collection, or without messages falls back to the generic
+/// status error.
+fn invalid_query_error(response: Response) -> JiraClientError {
+    query_error_messages(response).map_or(
+        JiraClientError::Api { status: 400 },
+        JiraClientError::InvalidJql,
+    )
+}
+
+fn query_error_messages(response: Response) -> Option<String> {
+    if content_length_exceeds(response.content_length(), MAX_ERROR_RESPONSE_BYTES) {
+        return None;
+    }
+    let body = read_bounded_body(response, MAX_ERROR_RESPONSE_BYTES).ok()?;
+    let collection: ErrorCollection = serde_json::from_slice(&body).ok()?;
+    let field_messages = collection
+        .errors
+        .into_iter()
+        .flatten()
+        .map(|(field, message)| format!("{field}: {message}"));
+    let messages: Vec<String> = collection
+        .error_messages
+        .into_iter()
+        .flatten()
+        .chain(field_messages)
+        .map(|message| terminal_field(Some(&message), "").trim().to_owned())
+        .filter(|message| !message.is_empty())
+        .collect();
+    (!messages.is_empty()).then(|| messages.join("; "))
+}
+
 fn same_origin_redirect_policy() -> Policy {
     Policy::custom(|attempt| {
         let same_origin = attempt
@@ -305,14 +382,14 @@ fn content_length_exceeds(content_length: Option<u64>, limit: usize) -> bool {
     content_length.is_some_and(|length| length > limit as u64)
 }
 
-fn read_bounded_metadata_body(mut reader: impl Read) -> Result<Vec<u8>, JiraClientError> {
+fn read_bounded_body(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, JiraClientError> {
     let mut body = Vec::new();
     reader
         .by_ref()
-        .take(MAX_ATTACHMENT_METADATA_BYTES as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut body)
         .map_err(|source| JiraClientError::MetadataRead { source })?;
-    if body.len() > MAX_ATTACHMENT_METADATA_BYTES {
+    if body.len() > limit {
         return Err(JiraClientError::MetadataTooLarge);
     }
     Ok(body)
@@ -517,18 +594,17 @@ mod tests {
 
     #[test]
     fn metadata_reader_enforces_the_exact_boundary_without_truncation() {
-        let exact = read_bounded_metadata_body(std::io::Cursor::new(vec![
-            b' ';
-            MAX_ATTACHMENT_METADATA_BYTES
-        ]))
+        let exact = read_bounded_body(
+            std::io::Cursor::new(vec![b' '; MAX_ATTACHMENT_METADATA_BYTES]),
+            MAX_ATTACHMENT_METADATA_BYTES,
+        )
         .unwrap();
         assert_eq!(exact.len(), 16_777_216);
 
-        let error = read_bounded_metadata_body(std::io::Cursor::new(vec![
-            b' ';
-            MAX_ATTACHMENT_METADATA_BYTES
-                + 1
-        ]))
+        let error = read_bounded_body(
+            std::io::Cursor::new(vec![b' '; MAX_ATTACHMENT_METADATA_BYTES + 1]),
+            MAX_ATTACHMENT_METADATA_BYTES,
+        )
         .unwrap_err();
         assert!(matches!(error, JiraClientError::MetadataTooLarge));
     }
@@ -1006,5 +1082,253 @@ mod tests {
             "the download finished in {:?}, so it did not test the total time",
             started.elapsed()
         );
+    }
+
+    const SEARCH_JQL: &str = r#"project = "ABC" AND summary ~ "a&b=c+d #1" ORDER BY created DESC"#;
+
+    fn search_mock<'a>(
+        server: &'a MockServer,
+        status: u16,
+        body: impl Into<String>,
+    ) -> httpmock::Mock<'a> {
+        let body = body.into();
+        server.mock(move |when, then| {
+            when.method(GET)
+                .path("/rest/api/3/search/jql")
+                .query_param("jql", SEARCH_JQL)
+                .query_param("maxResults", "25")
+                .query_param("fields", "summary,status,issuetype,created,updated,labels")
+                .query_param_count(r".*", r".*", 3)
+                .header("Authorization", AUTH_HEADER);
+            then.status(status)
+                .header("Content-Type", "application/json")
+                .body(body);
+        })
+    }
+
+    fn search(server: &MockServer) -> Result<SearchPage, JiraClientError> {
+        client(server).search_issues(SEARCH_JQL, 25)
+    }
+
+    /// A JSON error collection padded with trailing whitespace to exactly
+    /// `length` bytes.
+    fn padded_error_body(length: usize) -> String {
+        let mut body = serde_json::json!({"errorMessages": ["Bad query"]}).to_string();
+        body.push_str(&" ".repeat(length - body.len()));
+        body
+    }
+
+    #[test]
+    fn error_body_limit_matches_the_response_contract() {
+        assert_eq!(MAX_ERROR_RESPONSE_BYTES, 65_536);
+    }
+
+    #[test]
+    fn search_sends_the_encoded_jql_limit_and_fields_and_keeps_jira_order() {
+        let server = MockServer::start();
+        let mock = search_mock(
+            &server,
+            200,
+            serde_json::json!({
+                "issues": [
+                    {"id": "2", "key": "ABC-2", "fields": {"summary": "Second"}},
+                    {"id": "1", "key": "ABC-1", "fields": {"summary": "First"}}
+                ],
+                "nextPageToken": "next",
+                "isLast": false
+            })
+            .to_string(),
+        );
+
+        let page = search(&server).unwrap();
+
+        mock.assert_calls(1);
+        assert_eq!(page.is_last, Some(false));
+        let keys: Vec<&str> = page
+            .issues
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|issue| issue.key.as_str())
+            .collect();
+        assert_eq!(keys, ["ABC-2", "ABC-1"]);
+    }
+
+    #[test]
+    fn search_passes_the_limit_through_unchanged() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/search/jql")
+                .query_param("jql", "")
+                .query_param("maxResults", "100");
+            then.status(200)
+                .json_body(serde_json::json!({"issues": [], "isLast": true}));
+        });
+
+        let page = client(&server).search_issues("", 100).unwrap();
+
+        mock.assert_calls(1);
+        assert_eq!(page.is_last, Some(true));
+        assert!(page.issues.unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_400_surfaces_sanitized_jira_messages_on_one_line() {
+        let server = MockServer::start();
+        let mock = search_mock(
+            &server,
+            400,
+            serde_json::json!({
+                "errorMessages": [
+                    "Error in the JQL Query:\r\n\u{1b}[31mThe character '#' is reserved\u{202e}.",
+                    " \u{7}\t "
+                ],
+                "errors": {
+                    "summary": "Field\n'summary' is \u{9b}odd",
+                    "jql": "Expected a value"
+                }
+            })
+            .to_string(),
+        );
+
+        let error = search(&server).unwrap_err();
+
+        mock.assert_calls(1);
+        assert_eq!(
+            error.to_string(),
+            "invalid JQL query (400): Error in the JQL Query: [31mThe character '#' is reserved.; jql: Expected a value; summary: Field 'summary' is odd"
+        );
+    }
+
+    #[test]
+    fn search_400_without_usable_messages_falls_back_to_the_status_error() {
+        for body in [
+            "not json \u{1b}[31m secret-token".to_owned(),
+            serde_json::json!({}).to_string(),
+            serde_json::json!({"errorMessages": null, "errors": null}).to_string(),
+            serde_json::json!({"errorMessages": [], "errors": {}}).to_string(),
+            serde_json::json!({"errorMessages": ["\u{1b}\u{202e}", " "]}).to_string(),
+            serde_json::json!({"errorMessages": [42]}).to_string(),
+        ] {
+            let server = MockServer::start();
+            let mock = search_mock(&server, 400, body.clone());
+
+            let error = search(&server).unwrap_err();
+
+            mock.assert_calls(1);
+            assert!(
+                matches!(error, JiraClientError::Api { status: 400 }),
+                "{body}: {error:?}"
+            );
+            assert_eq!(error.to_string(), "Jira API error (HTTP 400)");
+        }
+    }
+
+    #[test]
+    fn search_400_error_bodies_are_bounded() {
+        let server = MockServer::start();
+        let exact = search_mock(&server, 400, padded_error_body(MAX_ERROR_RESPONSE_BYTES));
+        assert_eq!(
+            search(&server).unwrap_err().to_string(),
+            "invalid JQL query (400): Bad query"
+        );
+        exact.assert_calls(1);
+
+        let server = MockServer::start();
+        let oversized = search_mock(
+            &server,
+            400,
+            padded_error_body(MAX_ERROR_RESPONSE_BYTES + 1),
+        );
+        assert!(matches!(
+            search(&server).unwrap_err(),
+            JiraClientError::Api { status: 400 }
+        ));
+        oversized.assert_calls(1);
+    }
+
+    #[test]
+    fn search_400_bodies_without_content_length_are_still_bounded() {
+        let addr = raw_server(|mut stream| {
+            stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .unwrap();
+            let body = padded_error_body(MAX_ERROR_RESPONSE_BYTES + 1);
+            stream
+                .write_all(format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len()).as_bytes())
+                .unwrap();
+        });
+        let client = short_timeout_client(addr, Duration::from_secs(5));
+
+        let error = client.search_issues("project = ABC", 20).unwrap_err();
+
+        assert!(matches!(error, JiraClientError::Api { status: 400 }));
+    }
+
+    #[test]
+    fn search_maps_other_statuses_without_response_data() {
+        let cases: [(u16, &str); 5] = [
+            (
+                401,
+                "authentication failed (401): check JIRA_EMAIL and JIRA_API_TOKEN",
+            ),
+            (
+                403,
+                "forbidden (403): the account lacks permission for this operation",
+            ),
+            (404, "not found (404): issue search"),
+            (429, "rate limited by Jira (429): try again later"),
+            (500, "Jira API error (HTTP 500)"),
+        ];
+        for (status, expected) in cases {
+            let server = MockServer::start();
+            let mock = search_mock(
+                &server,
+                status,
+                serde_json::json!({"errorMessages": ["secret-token leaked"]}).to_string(),
+            );
+
+            let error = search(&server).unwrap_err();
+
+            mock.assert_calls(1);
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn other_endpoints_keep_generic_400_errors() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET);
+            then.status(400)
+                .json_body(serde_json::json!({"errorMessages": ["Field does not exist"]}));
+        });
+
+        let error = client(&server).myself().unwrap_err();
+
+        assert!(matches!(error, JiraClientError::Api { status: 400 }));
+    }
+
+    #[test]
+    fn search_success_responses_are_bounded() {
+        let server = MockServer::start();
+        let mock = search_mock(&server, 200, " ".repeat(MAX_ATTACHMENT_METADATA_BYTES + 1));
+
+        let error = search(&server).unwrap_err();
+
+        mock.assert_calls(1);
+        assert!(matches!(error, JiraClientError::MetadataTooLarge));
+    }
+
+    #[test]
+    fn invalid_search_json_is_a_metadata_error() {
+        let server = MockServer::start();
+        let mock = search_mock(&server, 200, r#"{"issues": [{"fields": {}}]}"#);
+
+        let error = search(&server).unwrap_err();
+
+        mock.assert_calls(1);
+        assert!(matches!(error, JiraClientError::MetadataJson { .. }));
     }
 }
