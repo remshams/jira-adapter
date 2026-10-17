@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::Policy;
@@ -175,7 +177,7 @@ impl JiraClient {
             .append_pair("fields", SEARCH_FIELDS);
         let response = self.authenticated_get(url)?;
         if response.status() == StatusCode::BAD_REQUEST {
-            return Err(invalid_query_error(response));
+            return Err(invalid_query_error(response, &self.credential_values()));
         }
         Self::bounded_metadata_json(response, "issue search")
     }
@@ -271,6 +273,15 @@ impl JiraClient {
         }))
     }
 
+    /// The request credentials as they could appear in a reflected error
+    /// body: the Basic authorization value, its base64 part, and the API
+    /// token. The full header value comes first so it is redacted whole.
+    /// The email alone is not a secret and legitimately appears in JQL.
+    fn credential_values(&self) -> [String; 3] {
+        let encoded = BASE64_STANDARD.encode(format!("{}:{}", self.email, self.api_token));
+        [format!("Basic {encoded}"), encoded, self.api_token.clone()]
+    }
+
     fn authenticated_get(&self, url: Url) -> Result<Response, JiraClientError> {
         self.http
             .get(url)
@@ -320,17 +331,18 @@ struct ErrorCollection {
 
 /// Maps a 400 from the search endpoint. Jira explains a rejected JQL query
 /// in the error body; its messages are joined into one terminal-safe line
-/// so an agent can fix the query. A body that is too large, unreadable, not
-/// an error collection, or without messages falls back to the generic
-/// status error.
-fn invalid_query_error(response: Response) -> JiraClientError {
-    query_error_messages(response).map_or(
+/// so an agent can fix the query. Occurrences of `credentials` in field
+/// names and messages become `[REDACTED]`. A body that is too large,
+/// unreadable, not an error collection, or without messages falls back to
+/// the generic status error.
+fn invalid_query_error(response: Response, credentials: &[String]) -> JiraClientError {
+    query_error_messages(response, credentials).map_or(
         JiraClientError::Api { status: 400 },
         JiraClientError::InvalidJql,
     )
 }
 
-fn query_error_messages(response: Response) -> Option<String> {
+fn query_error_messages(response: Response, credentials: &[String]) -> Option<String> {
     if content_length_exceeds(response.content_length(), MAX_ERROR_RESPONSE_BYTES) {
         return None;
     }
@@ -341,24 +353,28 @@ fn query_error_messages(response: Response) -> Option<String> {
         .into_iter()
         .flatten()
         .filter_map(|(field, message)| {
-            let message = error_line(&message)?;
-            let field = error_line(&field).unwrap_or_default();
+            let message = error_line(&message, credentials)?;
+            let field = error_line(&field, credentials).unwrap_or_default();
             Some(format!("{field}: {message}"))
         });
     let messages: Vec<String> = collection
         .error_messages
         .into_iter()
         .flatten()
-        .filter_map(|message| error_line(&message))
+        .filter_map(|message| error_line(&message, credentials))
         .chain(field_messages)
         .collect();
     (!messages.is_empty()).then(|| messages.join("; "))
 }
 
-/// One terminal-safe piece of a Jira error, or `None` when nothing visible
-/// remains.
-fn error_line(text: &str) -> Option<String> {
+/// One terminal-safe piece of a Jira error with `credentials` redacted, or
+/// `None` when nothing visible remains. Redaction runs after sanitizing so
+/// control characters inside a credential cannot hide it.
+fn error_line(text: &str, credentials: &[String]) -> Option<String> {
     let line = terminal_field(Some(text), "").trim().to_owned();
+    let line = credentials.iter().fold(line, |line, credential| {
+        line.replace(credential.as_str(), "[REDACTED]")
+    });
     (!line.is_empty()).then_some(line)
 }
 
@@ -1209,6 +1225,36 @@ mod tests {
             error.to_string(),
             "invalid JQL query (400): Error in the JQL Query: [31mThe character '#' is reserved.; jql: Expected a value; summary: Field 'summary' is odd"
         );
+    }
+
+    #[test]
+    fn search_400_redacts_credentials_but_keeps_the_email() {
+        let encoded = AUTH_HEADER.strip_prefix("Basic ").unwrap();
+        let server = MockServer::start();
+        let mock = search_mock(
+            &server,
+            400,
+            serde_json::json!({
+                "errorMessages": [
+                    format!("header {AUTH_HEADER} and {encoded}"),
+                    "token secret-token, split secret\u{1b}-token",
+                    "assignee = jane@example.com is invalid"
+                ],
+                "errors": {"secret-token": format!("Basic\t{encoded}")}
+            })
+            .to_string(),
+        );
+
+        let error = search(&server).unwrap_err();
+
+        mock.assert_calls(1);
+        assert_eq!(
+            error.to_string(),
+            "invalid JQL query (400): header [REDACTED] and [REDACTED]; token [REDACTED], split [REDACTED]; assignee = jane@example.com is invalid; [REDACTED]: [REDACTED]"
+        );
+        let debug = format!("{error:?}");
+        assert!(!debug.contains("secret-token"), "{debug}");
+        assert!(!debug.contains(encoded), "{debug}");
     }
 
     #[test]
