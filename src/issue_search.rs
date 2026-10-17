@@ -166,6 +166,29 @@ mod tests {
     }
 
     #[test]
+    fn issue_types_and_statuses_without_a_name_are_null() {
+        let output = IssueSearchOutput::from_page(
+            "x",
+            page(json!({
+                "issues": [
+                    {"key": "ABC-1", "fields": {"issuetype": {}, "status": {}}},
+                    {"key": "ABC-2", "fields": {
+                        "issuetype": {"name": null},
+                        "status": {"name": null}
+                    }}
+                ]
+            })),
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&output.to_pretty_json()).unwrap();
+        for issue in parsed["issues"].as_array().unwrap() {
+            assert!(issue["issueType"].is_null());
+            assert!(issue["status"].is_null());
+        }
+        assert_eq!(output.returned, 2);
+    }
+
+    #[test]
     fn issues_keep_jira_order() {
         let output = IssueSearchOutput::from_page(
             "x",
