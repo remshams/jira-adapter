@@ -12,14 +12,8 @@ use crate::xray::test_runs::{TestRunSortDirection, TestRunSortField, TestRunsOut
 pub(crate) fn read_issue(value: &str) -> ! {
     let issue_key = parse_issue_key(value);
     let config = load_config();
-    let client = match JiraClient::new(&config) {
-        Ok(client) => client,
-        Err(error) => exit(3, error),
-    };
-    let issue = match client.issue(&issue_key) {
-        Ok(issue) => issue,
-        Err(error) => exit(3, error),
-    };
+    let client = or_exit(JiraClient::new(&config), 3);
+    let issue = or_exit(client.issue(&issue_key), 3);
     write_stdout(&adf::render_issue(&issue));
 }
 
@@ -32,22 +26,17 @@ pub(crate) fn download_attachments(value: &str, output_directory: Option<PathBuf
     }
 
     let config = load_config();
-    let client = match JiraClient::new(&config) {
-        Ok(client) => client,
-        Err(error) => exit(3, error),
-    };
-    let metadata = match client.attachments(&issue_key) {
-        Ok(metadata) => metadata,
-        Err(error) => exit(3, error),
-    };
+    let client = or_exit(JiraClient::new(&config), 3);
+    let metadata = or_exit(client.attachments(&issue_key), 3);
     let manifest = match attachments::download_all(&client, &metadata, &output_directory) {
         Ok(manifest) => manifest,
-        Err(error) => {
-            let code = if error.is_filesystem() { 4 } else { 3 };
-            exit(code, error);
-        }
+        Err(error) => exit(attachment_exit_code(&error), error),
     };
     write_stdout(&manifest.stdout(&issue_key));
+}
+
+fn attachment_exit_code(error: &attachments::AttachmentError) -> i32 {
+    if error.is_filesystem() { 4 } else { 3 }
 }
 
 pub(crate) fn xray_test_runs(
@@ -60,31 +49,16 @@ pub(crate) fn xray_test_runs(
     // Both configuration sets are loaded before any request so a missing
     // setting fails without touching the network.
     let config = load_config();
-    let xray_config = match config::XrayConfig::load() {
-        Ok(xray) => xray,
-        Err(error) => exit(2, error),
-    };
-    let jira_client = match JiraClient::new(&config) {
-        Ok(client) => client,
-        Err(error) => exit(3, error),
-    };
-    let issue_id = match jira_client.issue_id(&issue_key) {
-        Ok(issue_id) => issue_id,
-        Err(error) => exit(3, error),
-    };
-    let xray_client = match XrayClient::new(&xray_config) {
-        Ok(client) => client,
-        Err(error) => exit(3, error),
-    };
+    let xray_config = or_exit(config::XrayConfig::load(), 2);
+    let jira_client = or_exit(JiraClient::new(&config), 3);
+    let issue_id = or_exit(jira_client.issue_id(&issue_key), 3);
+    let xray_client = or_exit(XrayClient::new(&xray_config), 3);
     let statuses = if statuses.is_empty() {
         None
     } else {
         Some(statuses.as_slice())
     };
-    let mut page = match xray_client.test_runs(&issue_id, statuses) {
-        Ok(page) => page,
-        Err(error) => exit(3, error),
-    };
+    let mut page = or_exit(xray_client.test_runs(&issue_id, statuses), 3);
     if let Some(field) = sort {
         // A sort without an explicit direction defaults to desc. Sorting
         // applies only to the returned page, never to the full history.
@@ -96,10 +70,7 @@ pub(crate) fn xray_test_runs(
 
 pub(crate) fn whoami() -> ! {
     let config = load_config();
-    let client = match JiraClient::new(&config) {
-        Ok(client) => client,
-        Err(error) => exit(3, error),
-    };
+    let client = or_exit(JiraClient::new(&config), 3);
     match client.myself() {
         Ok(account) => {
             let display_name = terminal_field(account.display_name.as_deref(), "<unknown>");
@@ -137,39 +108,44 @@ fn write_stdout(output: &str) -> ! {
 }
 
 fn terminal_field(value: Option<&str>, fallback: &str) -> String {
-    let Some(value) = value else {
-        return fallback.to_string();
-    };
-
-    let mut sanitized = String::with_capacity(value.len());
-    let mut characters = value.chars().peekable();
-    while let Some(character) = characters.next() {
-        match character {
-            '\r' => {
-                if characters.peek() == Some(&'\n') {
-                    characters.next();
-                }
-                sanitized.push(' ');
-            }
-            '\n' | '\t' => sanitized.push(' '),
-            character
-                if character.is_control()
-                    || matches!(
-                        character,
-                        '\u{061c}'
-                            | '\u{200e}'
-                            | '\u{200f}'
-                            | '\u{202a}'..='\u{202e}'
-                            | '\u{2066}'..='\u{2069}'
-                    ) => {}
-            character => sanitized.push(character),
-        }
-    }
-
+    let sanitized = value.map(sanitize_terminal_text).unwrap_or_default();
     if sanitized.trim().is_empty() {
         fallback.to_string()
     } else {
         sanitized
+    }
+}
+
+/// Folds line breaks and tabs into spaces and drops control and
+/// bidirectional formatting characters.
+fn sanitize_terminal_text(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    for character in value.replace("\r\n", "\n").chars() {
+        match character {
+            '\r' | '\n' | '\t' => sanitized.push(' '),
+            character if is_unsafe_terminal_character(character) => {}
+            character => sanitized.push(character),
+        }
+    }
+    sanitized
+}
+
+fn is_unsafe_terminal_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+fn or_exit<T>(result: Result<T, impl std::fmt::Display>, code: i32) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => exit(code, error),
     }
 }
 
