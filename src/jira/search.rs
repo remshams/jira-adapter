@@ -129,6 +129,25 @@ mod tests {
     }
 
     #[test]
+    fn named_values_without_a_name_parse_with_no_name() {
+        let page: SearchPage = serde_json::from_value(serde_json::json!({
+            "issues": [
+                {"key": "ABC-1", "fields": {"issuetype": {}, "status": {}}},
+                {"key": "ABC-2", "fields": {
+                    "issuetype": {"name": null},
+                    "status": {"name": null}
+                }}
+            ]
+        }))
+        .unwrap();
+
+        for issue in page.issues.unwrap() {
+            assert!(issue.fields.issue_type.unwrap().name.is_none());
+            assert!(issue.fields.status.unwrap().name.is_none());
+        }
+    }
+
+    #[test]
     fn missing_and_null_issue_lists_parse_as_absent() {
         let missing: SearchPage =
             serde_json::from_value(serde_json::json!({"isLast": true})).unwrap();
