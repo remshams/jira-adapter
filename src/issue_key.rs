@@ -25,28 +25,25 @@ impl FromStr for IssueKey {
         // uppercase letters or digits and starts with a letter. NUMBER is a
         // positive integer without leading zeroes. Bytes make those ASCII-only
         // length and character checks explicit without allocating.
-        let bytes = value.as_bytes();
-        let separator = bytes
-            .iter()
-            .position(|&byte| byte == b'-')
-            .ok_or(IssueKeyParseError)?;
-        let project = &bytes[..separator];
-        let number = &bytes[separator + 1..];
-
-        if !(2..=10).contains(&project.len())
-            || !project.first().is_some_and(u8::is_ascii_uppercase)
-            || !project[1..]
-                .iter()
-                .all(|&byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-            || number.is_empty()
-            || number[0] == b'0'
-            || !number.iter().all(u8::is_ascii_digit)
-        {
-            return Err(IssueKeyParseError);
+        let (project, number) = value.split_once('-').ok_or(IssueKeyParseError)?;
+        if is_project_key(project.as_bytes()) && is_issue_number(number.as_bytes()) {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(IssueKeyParseError)
         }
-
-        Ok(Self(value.to_owned()))
     }
+}
+
+fn is_project_key(project: &[u8]) -> bool {
+    (2..=10).contains(&project.len())
+        && project.first().is_some_and(u8::is_ascii_uppercase)
+        && project[1..]
+            .iter()
+            .all(|&byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+fn is_issue_number(number: &[u8]) -> bool {
+    number.first().is_some_and(|&digit| digit != b'0') && number.iter().all(u8::is_ascii_digit)
 }
 
 impl fmt::Display for IssueKey {
