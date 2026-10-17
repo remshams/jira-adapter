@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::output;
+
 /// Envelope of Xray's GraphQL endpoint. `errors` may be present even though
 /// the HTTP status is 200, so it is checked before the data is used. The
 /// message text is parsed but never rendered; errors are reported
@@ -204,13 +206,6 @@ pub struct TestRunOutput {
     pub test_execution_issue_id: Option<String>,
 }
 
-/// Bidi formatting code points that can spoof terminal output. They are
-/// not control characters, so serde_json leaves them literal.
-const BIDI_CODE_POINTS: &[char] = &[
-    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
-    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
-];
-
 impl TestRunsOutput {
     /// Builds the CLI output from one page. `returned` counts every entry
     /// of a non-null results list, including null entries; a null results
@@ -246,31 +241,17 @@ impl TestRunsOutput {
         }
     }
 
-    /// Renders the output as stable pretty JSON with one trailing newline.
-    /// serde_json escapes C0 controls below U+0020 but leaves DEL and the
-    /// C1 range (for example U+009B CSI and U+009D OSC) literal; those never
-    /// occur as JSON structure, so escaping them cannot break the document.
-    /// Bidi formatting code points are escaped the same way. Parsing the
-    /// output recovers the original value.
+    /// Renders the output as stable pretty JSON with one trailing newline,
+    /// escaping C1 controls, DEL, and bidi code points.
     pub fn to_pretty_json(&self) -> String {
-        let json = serde_json::to_string_pretty(self).expect("output should serialize");
-        let mut rendered = String::with_capacity(json.len());
-        for character in json.chars() {
-            let is_c1_or_del = ('\u{7F}'..='\u{9F}').contains(&character);
-            if is_c1_or_del || BIDI_CODE_POINTS.contains(&character) {
-                rendered.push_str(&format!("\\u{:04X}", character as u32));
-            } else {
-                rendered.push(character);
-            }
-        }
-        rendered.push('\n');
-        rendered
+        output::to_pretty_json(self)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::BIDI_CODE_POINTS;
 
     fn run_with(id: &str) -> TestRun {
         TestRun {
