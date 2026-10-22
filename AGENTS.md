@@ -13,6 +13,12 @@ Jira adapter is a cli tool that agents are using to connect to jira e.g. for rea
 - Use cargo-llvm-cov 0.9.0 and cargo-crap 0.4.3. Install them with `rustup component add llvm-tools-preview`, `cargo +stable install --locked --version 0.9.0 cargo-llvm-cov`, and `cargo +stable install --locked --version 0.4.3 cargo-crap` if they are unavailable.
 - Treat formatting differences, clippy findings, missed and timed-out mutants, and CRAP scores above the configured threshold as failures. Report any that cannot be resolved.
 
+## CodeRabbit
+
+- CodeRabbit does not review pull requests automatically.
+- When the work on a PR is finished and pushed, comment `@coderabbitai review` once with `gh pr comment <n> --body "@coderabbitai review"`. Do not trigger a review after every push. Batch fixes and trigger once per round.
+- If CodeRabbit replies that the rate limit is exceeded, wait the stated time, then trigger the review again.
+
 ## Trust model
 
 jcli assumes good user behavior:
