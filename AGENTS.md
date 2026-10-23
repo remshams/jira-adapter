@@ -15,9 +15,12 @@ Jira adapter is a cli tool that agents are using to connect to jira e.g. for rea
 
 ## CodeRabbit
 
-- CodeRabbit does not review pull requests automatically.
-- When the work on a PR is finished and pushed, comment `@coderabbitai review` once with `gh pr comment <n> --body "@coderabbitai review"`. Do not trigger a review after every push. Batch fixes and trigger once per round.
-- If CodeRabbit replies that the rate limit is exceeded, wait the stated time, then trigger the review again.
+- CodeRabbit does not review pull requests automatically. Each PR gets one CodeRabbit review.
+- Request it only when the PR is finished: your own review rounds are done, CI passes, and the branch is rebased onto its base. For a stack, wait until every layer is finished, then request one review per layer. Use `gh pr comment <n> --body "@coderabbitai review"`.
+- Fix all actionable findings in one push and add a regression test for every fix that changes behavior. Reply on each thread with the commit that fixes it, or the reason for declining.
+- Before replying, review the fix commits against the commit CodeRabbit reviewed, and check that each "Fixed in <sha>" reply points to a commit that addresses that finding.
+- Do not request another review, except when a fix changes production behavior for a Major or Critical finding. Then request one incremental review with `@coderabbitai review`.
+- If CodeRabbit replies that the rate limit is exceeded, wait the stated time, then trigger the request again. Count from when its message was posted; the number in it does not count down.
 
 ## Trust model
 
