@@ -6,6 +6,25 @@ Jira adapter is a cli tool that agents are using to connect to jira e.g. for rea
 
 - Always apply the `unslop` skill when writing or editing any text (responses, code comments, docs, commit messages, etc.)
 
+## Domain language
+
+Describe architecture in Domain-Driven Design terms. This applies to docs,
+issues, PR descriptions and explanations of the code.
+
+- Use the project's ubiquitous language: the words the domain uses, such as
+  `issue` and `attachment`. Use the same word in code, docs and conversation,
+  and don't switch between synonyms for one concept.
+- Name the parts of the model by their DDD role. An entity keeps its identity as
+  its data changes. A value object is defined by its values and is immutable. An
+  aggregate is a cluster of objects that changes only through its root.
+- Call stateless domain logic that belongs to no single type a domain service,
+  and code that runs one use case an application service.
+- Call a part of the model with its own language a bounded context. Code that
+  maps the Jira REST API to that model is an anti-corruption layer; keep Jira
+  response types out of the rest of the code.
+- Use these terms to describe the code that exists. Don't add layers, interfaces
+  or folders just to match a DDD pattern; keeping the project small still wins.
+
 ## Validation
 
 - After completing a task or feature, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo mutants`, `cargo llvm-cov --lcov --output-path lcov.info`, and `cargo crap --lcov lcov.info` before handoff.
