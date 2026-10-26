@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>jcli architecture</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f5f9;
+    --surface: #ffffff;
+    --ink: #172033;
+    --muted: #4a5568;
+    --rule: #d3dae4;
+    --code-bg: #e6ebf2;
+    --jira: #1d4fa0;
+    --jira-tint: #e3ecfa;
+    --xray: #1b6a4a;
+    --xray-tint: #e0f1e8;
+    --core-tint: #eef1f5;
+    --err: #9b2c2c;
+    --err-tint: #f8e6e6;
+    --edge: #5b6678;
+    --sans: Seravek, "Gill Sans Nova", Ubuntu, Calibri, "DejaVu Sans", source-sans-pro, sans-serif;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "Source Code Pro", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #10151d;
+      --surface: #171e29;
+      --ink: #e4e9f0;
+      --muted: #a7b1c0;
+      --rule: #2c3646;
+      --code-bg: #212b3a;
+      --jira: #93b8f6;
+      --jira-tint: #1a2a45;
+      --xray: #82d2aa;
+      --xray-tint: #17332a;
+      --core-tint: #1f2734;
+      --err: #f2a3a3;
+      --err-tint: #3a1f24;
+      --edge: #8d98aa;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 1.0625rem;
+    line-height: 1.6;
+  }
+  a { color: var(--jira); text-underline-offset: .18em; text-decoration-thickness: 1px; }
+  a:hover { text-decoration-thickness: 2px; }
+  :focus-visible { outline: 3px solid var(--jira); outline-offset: 2px; border-radius: 2px; }
+  .skip { position: absolute; left: -9999px; }
+  .skip:focus { left: 1rem; top: 1rem; background: var(--surface); padding: .5rem .8rem; z-index: 10; }
+
+  .layout {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 1.5rem 5rem;
+    display: grid;
+    grid-template-columns: 13rem minmax(0, 1fr);
+    gap: 3.5rem;
+  }
+  nav[aria-label="Sections"] {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    max-height: 100vh;
+    overflow-y: auto;
+    padding: 3.2rem 0 2rem;
+    font-size: .95rem;
+  }
+  nav .brand {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 1.05rem;
+    color: var(--ink);
+    margin: 0 0 1.1rem;
+  }
+  nav ol { list-style: none; margin: 0; padding: 0; border-left: 2px solid var(--rule); }
+  nav li { margin: 0; }
+  nav li li a { padding-left: 1.8rem; font-size: .9rem; }
+  nav ol ol { border: 0; }
+  nav a {
+    display: block;
+    padding: .3rem 0 .3rem 1rem;
+    margin-left: -2px;
+    border-left: 2px solid transparent;
+    color: var(--muted);
+    text-decoration: none;
+  }
+  nav a:hover { color: var(--ink); border-left-color: var(--jira); }
+
+  main { min-width: 0; padding-top: 3.2rem; max-width: 50rem; }
+  header { padding-bottom: 2rem; border-bottom: 1px solid var(--rule); }
+  h1 {
+    font-size: clamp(2.4rem, 5.5vw, 3.6rem);
+    line-height: 1.05;
+    letter-spacing: -.02em;
+    margin: 0 0 1.2rem;
+    font-weight: 700;
+  }
+  h1 code { font-size: .92em; background: none; padding: 0; color: var(--jira); }
+  .lede { font-size: 1.2rem; line-height: 1.55; margin: 0; max-width: 40em; }
+  section { padding-top: 2.6rem; scroll-margin-top: 1rem; }
+  h2 {
+    font-size: 1.6rem;
+    line-height: 1.2;
+    letter-spacing: -.01em;
+    margin: 0 0 1rem;
+  }
+  h3 {
+    font-size: 1.2rem;
+    margin: 2rem 0 .7rem;
+    padding-left: .75rem;
+    border-left: 4px solid var(--rule);
+    scroll-margin-top: 1rem;
+  }
+  h3.jira { border-left-color: var(--jira); }
+  h3.xray { border-left-color: var(--xray); }
+  p, li { max-width: 72ch; }
+  p { margin: 0 0 1rem; }
+  ul, ol { padding-left: 1.4rem; margin: 0 0 1rem; }
+  li { margin: .35rem 0; }
+
+  code, pre { font-family: var(--mono); font-size: .86em; }
+  code {
+    background: var(--code-bg);
+    padding: .08em .32em;
+    border-radius: 3px;
+    overflow-wrap: anywhere;
+  }
+  a code { color: inherit; }
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 1rem 1.2rem;
+    overflow-x: auto;
+    line-height: 1.5;
+    margin: 0 0 1.2rem;
+  }
+  pre code { background: none; padding: 0; font-size: 1em; overflow-wrap: normal; }
+
+  .table-wrap { overflow-x: auto; margin: 0 0 1.4rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: .95rem; }
+  caption { text-align: left; padding: .6rem .9rem; color: var(--muted); font-size: .9rem; border-bottom: 1px solid var(--rule); }
+  th, td { text-align: left; vertical-align: top; padding: .55rem .9rem; border-bottom: 1px solid var(--rule); }
+  tr:last-child td { border-bottom: 0; }
+  th { font-weight: 700; background: var(--core-tint); }
+  td.num { font-family: var(--mono); font-weight: 700; width: 4.5rem; }
+
+  figure { margin: 1.4rem 0 1.6rem; }
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+  }
+  .diagram svg { display: block; width: 100%; height: auto; min-width: 640px; }
+  figcaption { font-size: .92rem; color: var(--muted); margin-top: .6rem; }
+  .key { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; font-size: .9rem; color: var(--muted); margin: .6rem 0 0; padding: 0; list-style: none; }
+  .key li { margin: 0; display: flex; align-items: center; gap: .45rem; }
+  .swatch { width: 1.6rem; height: .9rem; border-radius: 3px; border: 1.5px solid; display: inline-block; }
+  .swatch.jira { background: var(--jira-tint); border-color: var(--jira); }
+  .swatch.xray { background: var(--xray-tint); border-color: var(--xray); }
+  .swatch.core { background: var(--core-tint); border-color: var(--edge); }
+  .swatch.err { background: var(--err-tint); border-color: var(--err); }
+  details { margin-top: .6rem; font-size: .95rem; }
+  summary { cursor: pointer; color: var(--jira); }
+  details ul { margin-top: .5rem; columns: 2 18rem; }
+  details li { break-inside: avoid; }
+
+  /* diagram parts */
+  svg text { font-family: var(--sans); fill: var(--ink); }
+  svg .m { font-family: var(--mono); font-size: 13px; font-weight: 700; }
+  svg .d { font-size: 13px; fill: var(--muted); }
+  svg .lbl { font-size: 12.5px; fill: var(--err); font-style: italic; }
+  svg rect { stroke-width: 1.5; }
+  svg .n-core rect { fill: var(--core-tint); stroke: var(--edge); }
+  svg .n-jira rect { fill: var(--jira-tint); stroke: var(--jira); }
+  svg .n-xray rect { fill: var(--xray-tint); stroke: var(--xray); }
+  svg .n-err rect { fill: var(--err-tint); stroke: var(--err); }
+  svg .e { fill: none; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+  svg .e-ink { stroke: var(--ink); }
+  svg .e-muted { stroke: var(--edge); }
+  svg .e-jira { stroke: var(--jira); }
+  svg .e-xray { stroke: var(--xray); }
+  svg .e-err { stroke: var(--err); stroke-dasharray: 5 4; }
+  svg .h-ink { fill: var(--ink); }
+  svg .h-muted { fill: var(--edge); }
+  svg .h-jira { fill: var(--jira); }
+  svg .h-xray { fill: var(--xray); }
+  svg .h-err { fill: var(--err); }
+
+  footer { margin-top: 3.5rem; padding-top: 1.2rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .95rem; }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 1.1rem 4rem; }
+    nav[aria-label="Sections"] { position: static; max-height: none; padding: 1.6rem 0 0; }
+    nav ol { border-left: 0; display: flex; flex-wrap: wrap; gap: .2rem .4rem; }
+    nav ol ol { display: none; }
+    nav a { padding: .25rem .6rem; border: 1px solid var(--rule); border-radius: 4px; margin: 0; background: var(--surface); }
+    nav a:hover { border-color: var(--jira); }
+    main { padding-top: 1.6rem; }
+    body { font-size: 1rem; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<div class="layout">
+<nav aria-label="Sections">
+  <p class="brand">jcli</p>
+  <ol>
+    <li><a href="#commands">Commands</a></li>
+    <li><a href="#runtime-flow">Runtime flow</a></li>
+    <li><a href="#modules-and-dependencies">Modules and dependencies</a></li>
+    <li><a href="#configuration">Configuration</a></li>
+    <li><a href="#jira-and-xray-requests">Jira and Xray requests</a>
+      <ol>
+        <li><a href="#jira">Jira</a></li>
+        <li><a href="#xray">Xray</a></li>
+      </ol>
+    </li>
+    <li><a href="#output">Output</a></li>
+    <li><a href="#attachment-downloads">Attachment downloads</a></li>
+    <li><a href="#credentials">Credentials</a></li>
+    <li><a href="#tests-and-quality-gates">Tests and quality gates</a></li>
+  </ol>
+</nav>
+
+<main id="content">
+<header>
+  <h1><code>jcli</code> architecture</h1>
+  <p class="lede">jcli is a small Rust CLI that reads Jira Cloud for coding agents. It prints an
+  issue as Markdown, searches issues with JQL, downloads an issue's attachments and
+  lists the test runs Xray Cloud stores for a test issue. It never changes data in
+  Jira or Xray. The binary is built with the stable toolchain and blocking reqwest,
+  without an async runtime (<a href="adr/0002-build-jcli-as-a-single-rust-binary.md">ADR 0002</a>).</p>
+</header>
+
+<section id="commands" aria-labelledby="commands-h">
+  <h2 id="commands-h">Commands</h2>
+  <div class="table-wrap" role="region" aria-labelledby="commands-h" tabindex="0">
+    <table>
+      <thead><tr><th scope="col">Command</th><th scope="col">Output on stdout</th></tr></thead>
+      <tbody>
+        <tr><td><code>jcli issue read &lt;KEY&gt;</code></td><td>The issue as Markdown</td></tr>
+        <tr><td><code>jcli issue search --jql &lt;JQL&gt; --json [--limit N]</code></td><td>The first page of matching issues as JSON</td></tr>
+        <tr><td><code>jcli issue attachments &lt;KEY&gt; [--out DIR]</code></td><td>A Markdown list of the downloaded files</td></tr>
+        <tr><td><code>jcli xray test-runs &lt;KEY&gt; --json [--status S]... [--sort started-on] [--direction asc|desc]</code></td><td>The first page of the test issue's test runs as JSON</td></tr>
+        <tr><td><code>jcli whoami</code></td><td>The account the credentials belong to, on one line</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><code>&lt;KEY&gt;</code> is a canonical issue key such as <code>ABC-123</code>: a project part of 2 to 10
+  uppercase ASCII letters or digits that starts with a letter, a hyphen, and a
+  positive number without leading zeros. URLs and bare numbers are rejected.</p>
+</section>
+
+<section id="runtime-flow" aria-labelledby="runtime-flow-h">
+  <h2 id="runtime-flow-h">Runtime flow</h2>
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 920 600" role="img" aria-labelledby="flow-title flow-desc">
+        <title id="flow-title">Runtime flow of a jcli command</title>
+        <desc id="flow-desc">src/main.rs (clap parsing) leads to src/commands.rs (application service per command), then src/issue_key.rs (parse the issue key), then src/config.rs (environment, .env, config.toml). Config leads to src/jira/client.rs (GET-only Jira client) and src/xray/client.rs (Xray client). The Jira client calls Jira Cloud REST API v3 and leads to adf, issue_search, attachments. The Xray client calls Xray Cloud API v2 and leads to xray/test_runs.rs (sort and JSON output). Both lead to stdout: Markdown or JSON, exit 0. On any failure, src/commands.rs leads to stderr: one error line, exit 1 to 4.</desc>
+        <defs>
+          <marker id="fa-ink" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="h-ink" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="fa-jira" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="h-jira" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="fa-xray" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="h-xray" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="fa-err" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="h-err" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <g aria-hidden="true">
+          <path class="e e-ink" marker-end="url(#fa-ink)" d="M460,70 V100"/>
+          <path class="e e-ink" marker-end="url(#fa-ink)" d="M460,150 V180"/>
+          <path class="e e-ink" marker-end="url(#fa-ink)" d="M460,230 V260"/>
+          <path class="e e-jira" marker-end="url(#fa-jira)" d="M420,310 L340,350"/>
+          <path class="e e-xray" marker-end="url(#fa-xray)" d="M500,310 L580,350"/>
+          <path class="e e-jira" marker-end="url(#fa-jira)" d="M220,375 H180"/>
+          <path class="e e-xray" marker-end="url(#fa-xray)" d="M700,375 H740"/>
+          <path class="e e-jira" marker-end="url(#fa-jira)" d="M330,400 V440"/>
+          <path class="e e-xray" marker-end="url(#fa-xray)" d="M590,400 V440"/>
+          <path class="e e-jira" marker-end="url(#fa-jira)" d="M360,490 L420,530"/>
+          <path class="e e-xray" marker-end="url(#fa-xray)" d="M560,490 L500,530"/>
+          <path class="e e-err" marker-end="url(#fa-err)" d="M600,125 H690"/>
+          <text class="lbl" x="645" y="115" text-anchor="middle">any failure</text>
+
+          <g class="n-core"><rect x="320" y="20" width="280" height="50" rx="6"/>
+            <text class="m" x="460" y="41" text-anchor="middle">src/main.rs</text>
+            <text class="d" x="460" y="59" text-anchor="middle">clap parsing</text></g>
+          <g class="n-core"><rect x="320" y="100" width="280" height="50" rx="6"/>
+            <text class="m" x="460" y="121" text-anchor="middle">src/commands.rs</text>
+            <text class="d" x="460" y="139" text-anchor="middle">application service per command</text></g>
+          <g class="n-core"><rect x="320" y="180" width="280" height="50" rx="6"/>
+            <text class="m" x="460" y="201" text-anchor="middle">src/issue_key.rs</text>
+            <text class="d" x="460" y="219" text-anchor="middle">parse the issue key</text></g>
+          <g class="n-core"><rect x="320" y="260" width="280" height="50" rx="6"/>
+            <text class="m" x="460" y="281" text-anchor="middle">src/config.rs</text>
+            <text class="d" x="460" y="299" text-anchor="middle">environment, .env, config.toml</text></g>
+          <g class="n-jira"><rect x="20" y="350" width="160" height="50" rx="6"/>
+            <text class="m" x="100" y="371" text-anchor="middle">Jira Cloud</text>
+            <text class="d" x="100" y="389" text-anchor="middle">REST API v3</text></g>
+          <g class="n-jira"><rect x="220" y="350" width="220" height="50" rx="6"/>
+            <text class="m" x="330" y="371" text-anchor="middle">src/jira/client.rs</text>
+            <text class="d" x="330" y="389" text-anchor="middle">GET-only Jira client</text></g>
+          <g class="n-xray"><rect x="480" y="350" width="220" height="50" rx="6"/>
+            <text class="m" x="590" y="371" text-anchor="middle">src/xray/client.rs</text>
+            <text class="d" x="590" y="389" text-anchor="middle">Xray client</text></g>
+          <g class="n-xray"><rect x="740" y="350" width="160" height="50" rx="6"/>
+            <text class="m" x="820" y="371" text-anchor="middle">Xray Cloud</text>
+            <text class="d" x="820" y="389" text-anchor="middle">API v2</text></g>
+          <g class="n-jira"><rect x="200" y="440" width="260" height="50" rx="6"/>
+            <text class="m" x="330" y="470" text-anchor="middle">adf, issue_search, attachments</text></g>
+          <g class="n-xray"><rect x="470" y="440" width="240" height="50" rx="6"/>
+            <text class="m" x="590" y="461" text-anchor="middle">xray/test_runs.rs</text>
+            <text class="d" x="590" y="479" text-anchor="middle">sort and JSON output</text></g>
+          <g class="n-core"><rect x="310" y="530" width="300" height="50" rx="6"/>
+            <text class="m" x="460" y="551" text-anchor="middle">stdout</text>
+            <text class="d" x="460" y="569" text-anchor="middle">Markdown or JSON, exit 0</text></g>
+          <g class="n-err"><rect x="690" y="100" width="220" height="50" rx="6"/>
+            <text class="m" x="800" y="121" text-anchor="middle">stderr</text>
+            <text class="d" x="800" y="139" text-anchor="middle">one error line, exit 1 to 4</text></g>
+        </g>
+      </svg>
+    </div>
+    <ul class="key" aria-label="Diagram key">
+      <li><span class="swatch core"></span>Shared steps</li>
+      <li><span class="swatch jira"></span>Jira side</li>
+      <li><span class="swatch xray"></span>Xray side</li>
+      <li><span class="swatch err"></span>Failure path</li>
+    </ul>
+    <details>
+      <summary>Runtime flow as a list of arrows</summary>
+      <ul>
+        <li><code>src/main.rs</code> (clap parsing) to <code>src/commands.rs</code> (application service per command)</li>
+        <li><code>src/commands.rs</code> to <code>src/issue_key.rs</code> (parse the issue key)</li>
+        <li><code>src/issue_key.rs</code> to <code>src/config.rs</code> (environment, .env, config.toml)</li>
+        <li><code>src/config.rs</code> to <code>src/jira/client.rs</code> (GET-only Jira client)</li>
+        <li><code>src/config.rs</code> to <code>src/xray/client.rs</code> (Xray client)</li>
+        <li><code>src/jira/client.rs</code> to Jira Cloud REST API v3</li>
+        <li><code>src/xray/client.rs</code> to Xray Cloud API v2</li>
+        <li><code>src/jira/client.rs</code> to adf, issue_search, attachments</li>
+        <li><code>src/xray/client.rs</code> to <code>xray/test_runs.rs</code> (sort and JSON output)</li>
+        <li>adf, issue_search, attachments to stdout: Markdown or JSON, exit 0</li>
+        <li><code>xray/test_runs.rs</code> to stdout</li>
+        <li><code>src/commands.rs</code>, on any failure, to stderr: one error line, exit 1 to 4</li>
+      </ul>
+    </details>
+  </figure>
+
+  <p><a href="../src/main.rs"><code>src/main.rs</code></a> declares the commands with clap's derive API and hands each one to a
+  function in <a href="../src/commands.rs"><code>src/commands.rs</code></a>. Clap rejects unknown commands, missing required
+  flags and out-of-range values such as <code>--limit 0</code> before jcli reads any
+  configuration, and exits with code 2.</p>
+
+  <p>Each function in <code>src/commands.rs</code> is the application service for one command. It
+  runs the same steps in order:</p>
+  <ol>
+    <li>Parse the issue key, if the command takes one. A malformed key exits 1 before
+    jcli loads configuration.</li>
+    <li>Load the configuration. <code>xray test-runs</code> also loads the Xray configuration
+    before it sends any request, so a missing Xray setting fails without network
+    traffic.</li>
+    <li>Build the client and send the requests.</li>
+    <li>Render the complete result and write it to stdout in one call, then exit 0.</li>
+  </ol>
+
+  <p>Every function ends the process itself and returns <code>!</code>. A failure at any step
+  prints <code>error: &lt;message&gt;</code> on stderr and exits with the step's code. stdout stays
+  empty on failure.</p>
+
+  <div class="table-wrap" role="region" aria-label="Exit codes" tabindex="0">
+    <table>
+      <thead><tr><th scope="col">Exit code</th><th scope="col">Cause</th></tr></thead>
+      <tbody>
+        <tr><td class="num">0</td><td>Success</td></tr>
+        <tr><td class="num">1</td><td>Invalid issue key</td></tr>
+        <tr><td class="num">2</td><td>Configuration error, or a usage error reported by clap</td></tr>
+        <tr><td class="num">3</td><td>Jira or Xray request failure, or a Jira response jcli refuses to use</td></tr>
+        <tr><td class="num">4</td><td>Filesystem failure, unsupported platform for attachments, or a failed stdout write</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><code>xray test-runs</code> resolves the issue key to Jira's numeric issue ID with one Jira
+  request, then calls Xray. <code>issue attachments</code> checks for Unix before it loads the
+  configuration and exits 4 on other platforms.</p>
+</section>
+
+<section id="modules-and-dependencies" aria-labelledby="modules-and-dependencies-h">
+  <h2 id="modules-and-dependencies-h">Modules and dependencies</h2>
+  <p>jcli has one bounded context: reading Jira issues and their Xray test runs for an
+  agent. The ubiquitous language uses Jira's terms: <code>issue</code>, <code>issue key</code>,
+  <code>attachment</code>, <code>JQL</code>, <code>test issue</code> and <code>test run</code>.</p>
+
+  <ul>
+    <li><a href="../src/main.rs"><code>src/main.rs</code></a>: the clap command tree and dispatch.</li>
+    <li><a href="../src/commands.rs"><code>src/commands.rs</code></a>: the application services, one function per command, plus
+    exit handling. It wires all other modules together.</li>
+    <li><a href="../src/issue_key.rs"><code>src/issue_key.rs</code></a>: <code>IssueKey</code>, a value object that only exists in canonical
+    form. Its parse error never echoes the input.</li>
+    <li><a href="../src/config.rs"><code>src/config.rs</code></a>: <code>Config</code> for Jira and <code>XrayConfig</code> for Xray, resolved from the
+    process environment, the <code>.env</code> in the working directory and the per-user
+    <code>config.toml</code>. It owns <code>SanitizedUrl</code>, which the <code>Debug</code> output of configuration
+    and clients uses.</li>
+    <li><a href="../src/jira/"><code>src/jira/</code></a>: the Jira side of the anti-corruption layer. <a href="../src/jira/client.rs"><code>client.rs</code></a> is the
+    GET-only HTTP client with status mapping, body limits and JQL error redaction.
+    <a href="../src/jira/issue.rs"><code>issue.rs</code></a>, <a href="../src/jira/attachment.rs"><code>attachment.rs</code></a> and <a href="../src/jira/search.rs"><code>search.rs</code></a> are serde models that deserialize
+    only the fields jcli requests. Jira's names such as <code>issuetype</code> and <code>isLast</code>
+    stop at their serde attributes.</li>
+    <li><a href="../src/xray/"><code>src/xray/</code></a>: the Xray side. <a href="../src/xray/client.rs"><code>client.rs</code></a> exchanges the API key for a bearer token
+    and runs the <code>getTestRuns</code> GraphQL query. <a href="../src/xray/test_runs.rs"><code>test_runs.rs</code></a> holds the response
+    models, the page sort and the <code>TestRunsOutput</code> JSON contract.</li>
+    <li><a href="../src/adf/"><code>src/adf/</code></a>: translates Jira's Atlassian Document Format (ADF) into Markdown and
+    renders the issue page for <code>issue read</code>
+    (<a href="adr/0008-hand-rolled-adf-to-markdown-renderer.md">ADR 0008</a>).</li>
+    <li><a href="../src/issue_search.rs"><code>src/issue_search.rs</code></a>: maps a Jira search page to the <code>IssueSearchOutput</code> JSON
+    contract.</li>
+    <li><a href="../src/attachments.rs"><code>src/attachments.rs</code></a>: plans and checks attachment
+    downloads, builds safe file names, and streams and writes each file
+    (<a href="adr/0009-attachment-downloads.md">ADR 0009</a>).</li>
+    <li><a href="../src/output.rs"><code>src/output.rs</code></a>: shared output rules: escaped pretty JSON and single-line,
+    control-free terminal fields.</li>
+  </ul>
+
+  <p>There is no separate domain model between the Jira response and the output. The
+  serde models in <code>src/jira/</code> and <code>src/xray/</code> hold only the requested fields, and
+  <code>adf</code>, <code>issue_search</code> and <code>xray::test_runs</code> turn them straight into the output
+  contract. That translation is where Jira and Xray shapes end.</p>
+
+  <p>Arrows show the imports that exist between modules.</p>
+
+  <figure>
+    <div class="diagram">
+      <svg viewBox="0 0 1000 420" role="img" aria-labelledby="deps-title deps-desc">
+        <title id="deps-title">Imports between jcli modules</title>
+        <desc id="deps-desc">main imports commands and xray::test_runs. commands imports issue_key, config, jira::client, xray::client, adf, attachments, issue_search, xray::test_runs and output. adf imports jira::issue. jira::issue imports jira::attachment. attachments imports jira::client, jira::attachment and issue_key. issue_search imports jira::search and output. jira::client imports config, issue_key, jira::issue, jira::attachment, jira::search and output. xray::client imports config and xray::test_runs. xray::test_runs imports output.</desc>
+        <defs>
+          <marker id="da-ink" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="h-ink" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="da-muted" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="h-muted" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="da-jira" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="h-jira" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="da-xray" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="h-xray" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <g aria-hidden="true">
+          <!-- main -->
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M500,56 V100"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M570,38 C700,38 720,60 720,110 V240 C720,262 760,270 790,280"/>
+          <!-- commands -->
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M430,118 C120,118 60,150 60,230 V370"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M570,118 C940,118 975,140 975,220 V370"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M480,136 L200,280"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M560,136 L800,190"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M490,136 L410,280"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M450,136 L240,190"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M510,136 L610,280"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M540,136 L820,280"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M520,136 L715,292 Q725,300 730,315 L748,370"/>
+          <!-- adf, attachments, issue_search -->
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M405,316 L413,370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M200,226 V280"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M250,226 C300,240 300,255 300,290 V340 C300,355 285,362 270,370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M150,226 C105,240 100,255 100,290 V370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M600,316 L590,370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M650,316 L728,370"/>
+          <!-- jira::client -->
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M150,316 L135,370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M185,316 L225,370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M215,316 L380,370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M235,316 L545,370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M250,316 L705,370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M265,316 L880,370"/>
+          <!-- jira::issue -->
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M345,388 L324,388"/>
+          <!-- xray::client, xray::test_runs -->
+          <path class="e e-xray" marker-end="url(#da-xray)" d="M900,208 C940,208 940,225 940,260 V370"/>
+          <path class="e e-xray" marker-end="url(#da-xray)" d="M830,226 V280"/>
+          <path class="e e-xray" marker-end="url(#da-xray)" d="M800,316 L767,370"/>
+
+          <g class="n-core"><rect x="430" y="20" width="140" height="36" rx="6"/><text class="m" x="500" y="43" text-anchor="middle">main</text></g>
+          <g class="n-core"><rect x="430" y="100" width="140" height="36" rx="6"/><text class="m" x="500" y="123" text-anchor="middle">commands</text></g>
+          <g class="n-jira"><rect x="130" y="190" width="140" height="36" rx="6"/><text class="m" x="200" y="213" text-anchor="middle">attachments</text></g>
+          <g class="n-xray"><rect x="760" y="190" width="140" height="36" rx="6"/><text class="m" x="830" y="213" text-anchor="middle">xray::client</text></g>
+          <g class="n-jira"><rect x="130" y="280" width="140" height="36" rx="6"/><text class="m" x="200" y="303" text-anchor="middle">jira::client</text></g>
+          <g class="n-jira"><rect x="330" y="280" width="140" height="36" rx="6"/><text class="m" x="400" y="303" text-anchor="middle">adf</text></g>
+          <g class="n-jira"><rect x="550" y="280" width="140" height="36" rx="6"/><text class="m" x="620" y="303" text-anchor="middle">issue_search</text></g>
+          <g class="n-xray"><rect x="760" y="280" width="140" height="36" rx="6"/><text class="m" x="830" y="303" text-anchor="middle">xray::test_runs</text></g>
+          <g class="n-core"><rect x="15" y="370" width="140" height="36" rx="6"/><text class="m" x="85" y="393" text-anchor="middle">issue_key</text></g>
+          <g class="n-jira"><rect x="180" y="370" width="140" height="36" rx="6"/><text class="m" x="250" y="393" text-anchor="middle">jira::attachment</text></g>
+          <g class="n-jira"><rect x="345" y="370" width="140" height="36" rx="6"/><text class="m" x="415" y="393" text-anchor="middle">jira::issue</text></g>
+          <g class="n-jira"><rect x="515" y="370" width="140" height="36" rx="6"/><text class="m" x="585" y="393" text-anchor="middle">jira::search</text></g>
+          <g class="n-core"><rect x="680" y="370" width="140" height="36" rx="6"/><text class="m" x="750" y="393" text-anchor="middle">output</text></g>
+          <g class="n-core"><rect x="845" y="370" width="140" height="36" rx="6"/><text class="m" x="915" y="393" text-anchor="middle">config</text></g>
+        </g>
+      </svg>
+    </div>
+    <ul class="key" aria-label="Diagram key">
+      <li><span class="swatch core"></span>Shared module</li>
+      <li><span class="swatch jira"></span>Jira side</li>
+      <li><span class="swatch xray"></span>Xray side</li>
+      <li>Line color follows the importing module</li>
+    </ul>
+    <details>
+      <summary>Imports as a list</summary>
+      <ul>
+        <li><code>main</code> imports <code>commands</code>, <code>xray::test_runs</code></li>
+        <li><code>commands</code> imports <code>issue_key</code>, <code>config</code>, <code>jira::client</code>, <code>xray::client</code>, <code>adf</code>, <code>attachments</code>, <code>issue_search</code>, <code>xray::test_runs</code>, <code>output</code></li>
+        <li><code>adf</code> imports <code>jira::issue</code></li>
+        <li><code>jira::issue</code> imports <code>jira::attachment</code></li>
+        <li><code>attachments</code> imports <code>jira::client</code>, <code>jira::attachment</code>, <code>issue_key</code></li>
+        <li><code>issue_search</code> imports <code>jira::search</code>, <code>output</code></li>
+        <li><code>jira::client</code> imports <code>config</code>, <code>issue_key</code>, <code>jira::issue</code>, <code>jira::attachment</code>, <code>jira::search</code>, <code>output</code></li>
+        <li><code>xray::client</code> imports <code>config</code>, <code>xray::test_runs</code></li>
+        <li><code>xray::test_runs</code> imports <code>output</code></li>
+      </ul>
+    </details>
+  </figure>
+
+  <p><code>config</code>, <code>issue_key</code> and <code>output</code> import no other jcli module. The Jira and Xray
+  clients do not know about each other; only <code>commands</code> combines them. All modules
+  are private to the binary crate, and Rust's module privacy is the only boundary
+  check (<a href="adr/0004-quality-gates.md">ADR 0004</a>).</p>
+</section>
+
+<section id="configuration" aria-labelledby="configuration-h">
+  <h2 id="configuration-h">Configuration</h2>
+  <p>jcli reads six settings. The Jira settings are required by every command, the
+  Xray settings only by <code>xray test-runs</code>.</p>
+
+  <div class="table-wrap" role="region" aria-label="Settings" tabindex="0">
+    <table>
+      <thead><tr><th scope="col">Environment variable</th><th scope="col"><code>config.toml</code> key</th></tr></thead>
+      <tbody>
+        <tr><td><code>JIRA_BASE_URL</code></td><td><code>base_url</code></td></tr>
+        <tr><td><code>JIRA_EMAIL</code></td><td><code>email</code></td></tr>
+        <tr><td><code>JIRA_API_TOKEN</code></td><td><code>api_token</code></td></tr>
+        <tr><td><code>XRAY_BASE_URL</code></td><td><code>xray_base_url</code></td></tr>
+        <tr><td><code>XRAY_CLIENT_ID</code></td><td><code>xray_client_id</code></td></tr>
+        <tr><td><code>XRAY_CLIENT_SECRET</code></td><td><code>xray_client_secret</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Precedence is per setting: the process environment, then the <code>.env</code> file in the
+  current working directory, then the per-user <code>config.toml</code>
+  (<a href="adr/0006-configuration-sources-and-precedence.md">ADR 0006</a>).</p>
+
+  <ul>
+    <li>The <code>.env</code> is read from the working directory only, with no search in parent
+    directories. jcli parses it with dotenvy without changing the process
+    environment. A leading UTF-8 byte order mark is skipped, and a duplicate key
+    keeps its first value.</li>
+    <li>The TOML file is <code>$XDG_CONFIG_HOME/jcli/config.toml</code> when <code>XDG_CONFIG_HOME</code> is
+    set, non-empty and absolute, otherwise <code>~/.config/jcli/config.toml</code> when <code>HOME</code>
+    is absolute. There is no system-wide file. Unknown keys are an error.</li>
+    <li>A value that is present in a higher source wins even when it is blank or not
+    valid Unicode. That setting then fails as <code>configuration value &lt;NAME&gt; is set but
+    empty</code>; it never falls through to a lower source. Only an absent value falls
+    through, and a setting absent everywhere fails as <code>missing configuration value
+    &lt;NAME&gt;</code>.</li>
+    <li>Both files are read on every load, so an unreadable or malformed file fails the
+    command even when the environment supplies every setting. File errors are
+    generic and never show the file's contents.</li>
+    <li>A base URL only has to parse as a URL. jcli appends a trailing slash so API
+    paths join onto any path prefix, and drops the query and fragment when it
+    builds request URLs.</li>
+  </ul>
+
+  <p>Following the trust model in <a href="../AGENTS.md"><code>AGENTS.md</code></a>, jcli does not cap file sizes, check
+  permissions or reject symlinks for these files
+  (<a href="adr/0003-keep-the-tool-small-and-trust-local-input.md">ADR 0003</a>).</p>
+</section>
+
+<section id="jira-and-xray-requests" aria-labelledby="jira-and-xray-requests-h">
+  <h2 id="jira-and-xray-requests-h">Jira and Xray requests</h2>
+
+  <h3 id="jira" class="jira">Jira</h3>
+  <p><code>JiraClient</code> sends only GET requests, with Basic authentication from <code>JIRA_EMAIL</code>
+  and <code>JIRA_API_TOKEN</code> and the user agent <code>jcli/&lt;version&gt;</code>
+  (<a href="adr/0005-read-only-get-only-http-layer.md">ADR 0005</a>). It keeps two reqwest
+  clients:</p>
+  <ul>
+    <li>The JSON client follows redirects only to the same scheme, host and port, for
+    at most 9 redirects. A redirect to another origin is not followed, and the redirect
+    status becomes a <code>Jira API error</code>.</li>
+    <li>The attachment client follows no redirects, so credentials never leave the
+    configured origin. It asks Jira for <code>redirect=false</code> and accepts only status 200.</li>
+  </ul>
+
+  <p>Both use a 10 second connect timeout and a 30 second request timeout. reqwest's
+  blocking client applies the request timeout to sending the request and receiving
+  the headers, then to each read on a streamed body. For attachments it is an idle
+  timeout: a large video keeps downloading while data arrives.</p>
+
+  <div class="table-wrap" role="region" aria-label="Jira requests per command" tabindex="0">
+    <table>
+      <thead><tr><th scope="col">Command</th><th scope="col">Request</th></tr></thead>
+      <tbody>
+        <tr><td><code>whoami</code></td><td><code>GET rest/api/3/myself</code></td></tr>
+        <tr><td><code>issue read</code></td><td><code>GET rest/api/3/issue/{key}?fields=summary,issuetype,status,assignee,reporter,labels,created,description,attachment</code></td></tr>
+        <tr><td><code>issue search</code></td><td><code>GET rest/api/3/search/jql?jql=...&amp;maxResults=N&amp;fields=summary,status,issuetype,created,updated,labels</code></td></tr>
+        <tr><td><code>issue attachments</code></td><td><code>GET rest/api/3/issue/{key}?fields=attachment</code>, then <code>GET rest/api/3/attachment/content/{id}?redirect=false</code> per attachment</td></tr>
+        <tr><td><code>xray test-runs</code></td><td><code>GET rest/api/3/issue/{key}?fields=summary</code> for the numeric issue ID</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>jcli builds every URL from the configured base URL. It ignores the resource URLs
+  in Jira's responses, and appends the issue key and attachment ID as single encoded
+  path segments.</p>
+
+  <p>Issue, search and attachment metadata responses are read into memory up to
+  16 MiB; a larger body fails without truncation. <code>whoami</code> reads its small response
+  without that limit.</p>
+
+  <p>Status codes map to fixed messages: 401 names <code>JIRA_EMAIL</code> and <code>JIRA_API_TOKEN</code>,
+  403 is a permission error, 404 names the resource, 429 asks to retry later, and
+  anything else reports only the HTTP status. Error messages never contain response
+  bodies, with one exception. A 400 from the search endpoint reads Jira's
+  <code>errorMessages</code> and <code>errors</code> from a body of at most 64 KiB and joins them into one
+  line: <code>invalid JQL query (400): ...</code>. Each message is reduced to one terminal-safe
+  line, and field errors with a blank message are dropped. The API token and the
+  Basic authorization value, with and without the <code>Basic </code> prefix, become
+  <code>[REDACTED]</code>. The email stays, because JQL errors quote it. Without a usable
+  message the error falls back to the generic HTTP 400.</p>
+
+  <h3 id="xray" class="xray">Xray</h3>
+  <p>Xray Cloud authenticates and queries over POST, so <code>XrayClient</code> cannot be GET-only.
+  It sends two requests per <code>xray test-runs</code> call, and neither changes Xray data:</p>
+  <ol>
+    <li><code>POST api/v2/authenticate</code> with the client ID and secret. Xray answers with a
+    bearer token as a bare JSON string, read up to 64 KiB. The token lives only
+    for this call.</li>
+    <li><code>POST api/v2/graphql</code> with the bearer token and the <code>getTestRuns</code> query for the
+    numeric issue ID. <code>limit</code> is 100 and <code>start</code> is 0. <code>--status</code> values travel as
+    a GraphQL variable, never as query text. The response is read up to 16 MiB.</li>
+  </ol>
+
+  <p>The Xray client follows no redirects, because both requests carry credentials. It
+  uses the same 10 second connect and 30 second request timeouts. Status codes map
+  like the Jira ones. A GraphQL <code>errors</code> array in a 200 response becomes the generic
+  <code>Xray GraphQL query failed</code>; the server's message is discarded because it may echo
+  input. reqwest errors have their URL removed before jcli stores them.</p>
+</section>
+
+<section id="output" aria-labelledby="output-h">
+  <h2 id="output-h">Output</h2>
+  <p>Output is written for agents (<a href="adr/0007-output-for-agents.md">ADR 0007</a>).
+  Results go to stdout as Markdown or JSON with no colors or progress. Errors go to
+  stderr as one <code>error: </code> line once the arguments parse, and the exit code is non-zero.
+  Invalid arguments get clap's multi-line usage message and exit 2.</p>
+
+  <p><code>issue read</code> prints:</p>
+<pre><code># ABC-123: &lt;summary&gt;
+
+- Type: &lt;issue type or Unknown&gt;
+- Status: &lt;status&gt;
+- Assignee: &lt;display name, Unassigned or Unknown&gt;
+- Reporter: &lt;display name or Unknown&gt;
+- Created: &lt;timestamp as Jira returns it, or Unknown&gt;
+- Labels: &lt;comma-separated or None&gt;
+- Attachments: &lt;count&gt;
+
+## Description
+
+&lt;ADF rendered as Markdown, or No description.&gt;</code></pre>
+
+  <p>Metadata values are reduced to one line, have control and bidirectional
+  formatting characters removed and have Markdown characters escaped. The ADF
+  renderer handles paragraphs, headings, bullet and ordered lists, code blocks,
+  blockquotes, hard breaks and the <code>strong</code>, <code>em</code>, <code>code</code> and <code>link</code> marks. Links
+  render only for absolute <code>http</code> and <code>https</code> URLs. For an unknown node it renders
+  the text and known child content it can find instead of failing the issue.
+  Comments are not rendered.</p>
+
+  <p><code>issue search</code> prints pretty JSON with <code>jql</code>, <code>returned</code>, <code>truncated</code> and
+  <code>issues</code>. <code>truncated</code> is <code>!isLast</code>, or null when Jira omits <code>isLast</code>. Each issue
+  has <code>key</code>, <code>issueType</code>, <code>status</code>, <code>summary</code>, <code>created</code>, <code>updated</code> and <code>labels</code>.
+  Missing values stay null, except <code>labels</code>, which becomes <code>[]</code>. Issues keep Jira's
+  order, so sorting is done with <code>ORDER BY</code> in the JQL. jcli passes the JQL to Jira
+  unchanged and fetches only the first page; <code>--limit</code> defaults to 20 and accepts 1
+  to 100. An empty result exits 0 with <code>"issues": []</code>.</p>
+
+  <p><code>xray test-runs</code> prints pretty JSON with <code>testKey</code>, <code>total</code>, <code>returned</code>,
+  <code>truncated</code>, <code>start</code>, <code>limit</code> and <code>runs</code>. Each run has <code>id</code>, <code>status</code>,
+  <code>startedOn</code>, <code>finishedOn</code> and <code>testExecutionIssueId</code>; a null entry from Xray stays
+  null. <code>truncated</code> is <code>total &gt; returned</code>, or null without a total. <code>--sort
+  started-on</code> reorders only the returned page, newest first unless <code>--direction asc</code>
+  is given. Runs with a missing or unparseable <code>startedOn</code> come after dated runs,
+  and null entries come last. Ties break by run ID, then by original position.</p>
+
+  <p>Both JSON outputs escape DEL, the C1 control range and bidirectional formatting
+  characters as <code>\uXXXX</code>, so parsing the JSON returns the original text.</p>
+
+  <p><code>issue attachments</code> prints <code># &lt;KEY&gt; attachments</code> followed by one <code>- &lt;file name&gt;</code>
+  line per downloaded file, or <code>No attachments.</code> In the second case it creates no
+  directory.</p>
+
+  <p><code>whoami</code> prints <code>&lt;display name&gt; &lt;&lt;email&gt;&gt; (&lt;account ID&gt;)</code> with placeholders for
+  missing values.</p>
+</section>
+
+<section id="attachment-downloads" aria-labelledby="attachment-downloads-h">
+  <h2 id="attachment-downloads-h">Attachment downloads</h2>
+  <p><code>issue attachments</code> writes into <code>./&lt;KEY&gt;/</code>, or into the directory given with
+  <code>--out</code>, which jcli uses as is. It plans every download before the first request
+  and rejects the whole set when:</p>
+  <ul>
+    <li>an attachment ID is empty, longer than 256 bytes, <code>.</code> or <code>..</code>, or repeated,</li>
+    <li>a size is negative or larger than 20 GiB,</li>
+    <li>the set has more than 1,000 attachments or more than 100 GiB in total,</li>
+    <li>two generated file names are equal when compared case-insensitively.</li>
+  </ul>
+
+  <p>A file name is <code>&lt;id&gt;-&lt;filename&gt;</code>, at most 240 bytes. A numeric ID of up to 48
+  bytes stays as is; other IDs become <code>id-&lt;hex&gt;</code> or, when longer than 48 bytes,
+  <code>id-sha256-&lt;hash&gt;</code>. The filename keeps ASCII letters, digits, <code>.</code> and <code>-</code>, and
+  collapses every other run of characters to one <code>-</code>. Leading and trailing dots and
+  hyphens are trimmed, an empty result becomes <code>attachment</code>, and Windows device
+  names such as <code>CON</code> get a <code>file-</code> prefix.</p>
+
+  <p>jcli creates the output directory with mode <code>0700</code> when it is missing. It then
+  downloads attachments one at a time in Jira's order. Each download streams into a
+  temporary <code>.jcli-attachment-*</code> file in that directory, which only the owner can
+  read. The byte count must match the size in Jira's metadata exactly. A verified
+  file then atomically replaces its final name. If a later attachment fails, the
+  files already replaced stay, the failed temporary file is removed and stdout stays
+  empty (<a href="adr/0009-attachment-downloads.md">ADR 0009</a>).</p>
+</section>
+
+<section id="credentials" aria-labelledby="credentials-h">
+  <h2 id="credentials-h">Credentials</h2>
+  <p>Credentials never reach output. <code>Config</code>, <code>XrayConfig</code> and <code>XrayClient</code> implement
+  <code>Debug</code> by hand and print only a URL without user info, query or fragment. Error
+  messages name settings, not values. The only Jira text that reaches an error is the
+  JQL error described above, with credentials redacted. Xray GraphQL messages are
+  dropped.</p>
+</section>
+
+<section id="tests-and-quality-gates" aria-labelledby="tests-and-quality-gates-h">
+  <h2 id="tests-and-quality-gates-h">Tests and quality gates</h2>
+  <p>Unit tests live next to the code in <code>#[cfg(test)]</code> modules. They cover parsers,
+  the ADF renderer per node type, configuration precedence through a testable
+  <code>from_sources</code> function, download planning and file naming. Client tests use
+  <code>httpmock</code> to check the exact requests, authentication headers, status mapping and
+  body limits. Timeout tests start raw <code>TcpListener</code> servers that stall headers or
+  bodies, or that keep sending data past the request timeout.</p>
+
+  <p>The CLI tests in <a href="../tests/"><code>tests/</code></a> are black-box tests. <a href="../tests/common/mod.rs"><code>tests/common/mod.rs</code></a> runs the
+  built <code>jcli</code> binary with a cleared environment, in a fresh temporary directory or
+  one the test provides. Each test starts its own <code>httpmock</code> server, and the tests
+  assert only on stdout, stderr, exit codes and written files.</p>
+
+  <p>The gates (<a href="adr/0004-quality-gates.md">ADR 0004</a>):</p>
+  <ul>
+    <li><code>cargo fmt --check</code>, also run by the <a href="../.githooks/pre-commit"><code>.githooks/pre-commit</code></a> hook.</li>
+    <li><code>cargo clippy --all-targets -- -D warnings</code>. <a href="../Cargo.toml"><code>Cargo.toml</code></a> also denies the whole
+    <code>clippy::all</code> group.</li>
+    <li><code>cargo test</code>.</li>
+    <li><code>cargo llvm-cov</code> for coverage and <code>cargo crap</code> for the CRAP score, with the
+    threshold in <a href="../.cargo-crap.toml"><code>.cargo-crap.toml</code></a>.</li>
+    <li><code>cargo machete</code> for unused dependencies.</li>
+    <li><code>cargo mutants</code>. Pull requests check the mutants in their diff against the base
+    branch; pushes to <code>main</code> and manual runs check the full suite in four shards.
+    <a href="../.cargo/mutants.toml"><code>.cargo/mutants.toml</code></a> sets a minimum test timeout of 20 seconds for the
+    timeout tests.</li>
+  </ul>
+
+  <p>CI runs the gates in jobs; <code>fmt</code> and <code>clippy</code> share the Lint job. The <code>ci-success</code>
+  job fails if any job failed or was cancelled, and a ruleset on <code>main</code> requires it.</p>
+
+  <p>The <a href="adr/README.md">ADR index</a> records the decisions behind these rules.</p>
+</section>
+
+</main>
+</div>
+</body>
+</html>
