@@ -65,8 +65,47 @@ jobs:
           path: lcov.info
           if-no-files-found: ignore
 
+  machete:
+    name: Unused dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-machete@0.9.2
+      - run: cargo machete
+
+  mutants-changed:
+    name: Mutants (changed code)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Diff against the PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git diff "$BASE_SHA"...HEAD > mutants.diff
+      - run: cargo mutants --in-place --in-diff mutants.diff
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mutants-changed
+          path: mutants.out
+          if-no-files-found: ignore
+
   mutants:
     name: Mutants (shard ${{ matrix.shard }}/4)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -88,3 +127,17 @@ jobs:
           name: mutants-shard-${{ matrix.shard }}
           path: mutants.out
           if-no-files-found: ignore
+
+  ci-success:
+    name: ci-success
+    needs: [lint, test, coverage, machete, mutants-changed, mutants]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          if [[ "$RESULTS" == *failure* || "$RESULTS" == *cancelled* ]]; then
+            exit 1
+          fi
