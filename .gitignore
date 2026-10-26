@@ -2,4 +2,6 @@
 /mutants.out*
 /mutants.diff
 /lcov.info
+
+# Personal secrets. Copy .env.tpl to .env and fill in your values.
 .env
