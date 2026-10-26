@@ -85,6 +85,6 @@ Add the label when any of these apply:
 - The PR adds an architecture decision record or changes module boundaries.
 - New behavior rests on Jira or Xray responses nobody has checked against a real instance.
 
-Leave the label off for `small` changes with no behavior change, such as documentation, test-only changes, formatting or refactors that keep the CLI contract. If you are unsure, add it.
+Leave the label off only when none of the triggers above apply, for `small` changes with no behavior change, such as documentation, test-only changes, formatting or refactors that keep the CLI contract. If you are unsure, add it.
 
 Decide again when the scope changes, and add or remove the label to match.
