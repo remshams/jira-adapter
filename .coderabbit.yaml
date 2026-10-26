@@ -3,3 +3,6 @@ reviews:
   auto_review:
     # Agents trigger reviews with "@coderabbitai review" to stay under the rate limit.
     enabled: false
+    # Also review stacked pull requests that target another feature branch.
+    base_branches:
+      - ".*"
