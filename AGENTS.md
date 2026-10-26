@@ -10,6 +10,7 @@ working directory (copy `.env.tpl` and uncomment the settings you use), or
 `$XDG_CONFIG_HOME/jcli/config.toml` (default `~/.config/jcli/config.toml`). The
 environment wins over `.env`, and `.env` wins over the TOML file. The Xray settings
 are only needed for `jcli xray ...` commands. Run `jcli --help` for the commands.
+The agent skill in `skills/jira/SKILL.md` describes how to use jcli.
 
 ## Architecture documentation
 
