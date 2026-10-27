@@ -2,9 +2,9 @@
 
 jcli is a small Rust CLI that reads Jira Cloud for coding agents. It prints an
 issue as Markdown, searches issues with JQL, downloads an issue's attachments and
-lists the test runs Xray Cloud stores for a Test or Test Execution issue. It never changes data in
-Jira or Xray. The binary is built with the stable toolchain and blocking reqwest,
-without an async runtime ([ADR 0002](adr/0002-build-jcli-as-a-single-rust-binary.md)).
+lists the test runs Xray Cloud stores for a Test or Test Execution issue. It never
+changes data in Jira or Xray. The binary is built with the stable toolchain and
+blocking reqwest, without an async runtime ([ADR 0002](adr/0002-build-jcli-as-a-single-rust-binary.md)).
 
 ## Commands
 
@@ -268,9 +268,9 @@ It sends two requests per `xray test-runs` call, and neither changes Xray data:
    bearer token as a bare JSON string, read up to 64 KiB. The token lives only
    for this call.
 2. `POST api/v2/graphql` with the bearer token and the `getTestRuns` query for the
-   numeric issue ID. A Test sends the ID as `testIssueIds`, a Test Execution or Sub
-   Test Execution as `testExecIssueIds`; each kind has its own query text. `limit` is 100 and
-   `start` is 0. `--status` values travel as a GraphQL variable, never as query
+   numeric issue ID. A Test sends the ID as `testIssueIds`, a Test Execution or
+   Sub Test Execution as `testExecIssueIds`; each kind has its own query text.
+   `limit` is 100 and `start` is 0. `--status` values travel as a GraphQL variable, never as query
    text. The response is read up to 16 MiB.
 
 The Xray client follows no redirects, because both requests carry credentials. It

@@ -244,9 +244,9 @@
   <h1><code>jcli</code> architecture</h1>
   <p class="lede">jcli is a small Rust CLI that reads Jira Cloud for coding agents. It prints an
   issue as Markdown, searches issues with JQL, downloads an issue's attachments and
-  lists the test runs Xray Cloud stores for a Test or Test Execution issue. It never changes data in
-  Jira or Xray. The binary is built with the stable toolchain and blocking reqwest,
-  without an async runtime (<a href="adr/0002-build-jcli-as-a-single-rust-binary.md">ADR 0002</a>).</p>
+  lists the test runs Xray Cloud stores for a Test or Test Execution issue. It never
+  changes data in Jira or Xray. The binary is built with the stable toolchain and
+  blocking reqwest, without an async runtime (<a href="adr/0002-build-jcli-as-a-single-rust-binary.md">ADR 0002</a>).</p>
 </header>
 
 <section id="commands" aria-labelledby="commands-h">
@@ -672,9 +672,9 @@
     bearer token as a bare JSON string, read up to 64 KiB. The token lives only
     for this call.</li>
     <li><code>POST api/v2/graphql</code> with the bearer token and the <code>getTestRuns</code> query for the
-    numeric issue ID. A Test sends the ID as <code>testIssueIds</code>, a Test Execution or Sub
-    Test Execution as <code>testExecIssueIds</code>; each kind has its own query text. <code>limit</code> is 100 and
-    <code>start</code> is 0. <code>--status</code> values travel as a GraphQL variable, never as query
+    numeric issue ID. A Test sends the ID as <code>testIssueIds</code>, a Test Execution or
+    Sub Test Execution as <code>testExecIssueIds</code>; each kind has its own query text.
+    <code>limit</code> is 100 and <code>start</code> is 0. <code>--status</code> values travel as a GraphQL variable, never as query
     text. The response is read up to 16 MiB.</li>
   </ol>
 
