@@ -300,6 +300,25 @@ fn a_test_execution_key_without_runs_prints_an_empty_list() {
 }
 
 #[test]
+fn a_sub_test_execution_key_queries_the_runs_it_contains() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue_with_fields(
+        &server,
+        serde_json::json!({"issuetype": {"name": "Sub Test Execution"}}),
+    );
+    let _auth = mock_auth(&server);
+    let graphql = mock_graphql_for_test_execution(&server, page_body(1, 1), None);
+
+    let output = run(&server, &[]);
+
+    graphql.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    let value: Value = serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(value["issueKind"], "testExecution");
+    assert_eq!(value["returned"], 1);
+}
+
+#[test]
 fn status_and_sort_flags_work_for_a_test_execution_key() {
     let server = MockServer::start();
     let _jira_issue = mock_jira_issue_with_fields(
