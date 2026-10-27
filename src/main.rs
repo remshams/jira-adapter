@@ -54,7 +54,7 @@ enum IssueCommand {
         #[command(subcommand)]
         command: AttachmentsCommand,
     },
-    /// Search issues with JQL and print the first page as JSON
+    /// Search issues with JQL and print up to --limit matches as JSON
     Search {
         /// JQL query, passed to Jira unchanged. Use ORDER BY to sort.
         #[arg(long, value_name = "JQL", allow_hyphen_values = true)]
@@ -62,12 +62,12 @@ enum IssueCommand {
         /// Emit JSON output (required in this version)
         #[arg(long, required = true)]
         json: bool,
-        /// Maximum number of issues to return (1-100)
+        /// Maximum number of issues to return (1-1000)
         #[arg(
             long,
             value_name = "N",
             default_value_t = 20,
-            value_parser = clap::value_parser!(u32).range(1..=100)
+            value_parser = clap::value_parser!(u32).range(1..=1000)
         )]
         limit: u32,
     },
