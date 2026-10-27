@@ -81,7 +81,14 @@ fn downloads_binary_files_with_safe_names_and_exact_requests() {
     let output = run(
         &server,
         root.path(),
-        &["issue", "attachments", "ABC-123", "--out", "downloads"],
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--out",
+            "downloads",
+        ],
     );
 
     metadata_mock.assert_calls(1);
@@ -116,7 +123,14 @@ fn out_directory_is_used_directly() {
     let output = run(
         &server,
         root.path(),
-        &["issue", "attachments", "ABC-123", "--out", "chosen"],
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--out",
+            "chosen",
+        ],
     );
 
     metadata_mock.assert_calls(1);
@@ -132,7 +146,11 @@ fn no_attachments_prints_markdown_without_creating_default_directory() {
     let root = tempfile::tempdir().unwrap();
     let metadata_mock = metadata(&server, serde_json::json!([]));
 
-    let output = run(&server, root.path(), &["issue", "attachments", "ABC-123"]);
+    let output = run(
+        &server,
+        root.path(),
+        &["issue", "attachments", "download", "ABC-123"],
+    );
 
     metadata_mock.assert_calls(1);
     assert_eq!(output.status.code(), Some(0));
@@ -158,7 +176,14 @@ fn existing_target_file_is_replaced_after_a_successful_download() {
     let output = run(
         &server,
         root.path(),
-        &["issue", "attachments", "ABC-123", "--out", "downloads"],
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--out",
+            "downloads",
+        ],
     );
 
     metadata_mock.assert_calls(1);
@@ -188,7 +213,14 @@ fn an_unreplaceable_final_directory_is_a_filesystem_failure() {
     let output = run(
         &server,
         root.path(),
-        &["issue", "attachments", "ABC-123", "--out", "downloads"],
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--out",
+            "downloads",
+        ],
     );
 
     metadata_mock.assert_calls(1);
@@ -234,6 +266,7 @@ fn later_content_failure_keeps_an_earlier_download_and_prints_no_stdout() {
         &[
             "issue",
             "attachments",
+            "download",
             "ABC-123",
             "--out",
             "nested/downloads",
@@ -271,7 +304,14 @@ fn size_mismatch_leaves_no_final_files_or_stdout() {
     let output = run(
         &server,
         root.path(),
-        &["issue", "attachments", "ABC-123", "--out", "downloads"],
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--out",
+            "downloads",
+        ],
     );
 
     metadata_mock.assert_calls(1);
@@ -301,7 +341,11 @@ fn unsafe_filename_cannot_escape_or_add_terminal_or_markdown_structure() {
         b"safe",
     );
 
-    let output = run(&server, root.path(), &["issue", "attachments", "ABC-123"]);
+    let output = run(
+        &server,
+        root.path(),
+        &["issue", "attachments", "download", "ABC-123"],
+    );
 
     metadata_mock.assert_calls(1);
     content_mock.assert_calls(1);
@@ -331,7 +375,11 @@ fn dot_ids_fail_before_content_requests() {
             then.status(200);
         });
 
-        let output = run(&server, root.path(), &["issue", "attachments", "ABC-123"]);
+        let output = run(
+            &server,
+            root.path(),
+            &["issue", "attachments", "download", "ABC-123"],
+        );
 
         metadata_mock.assert_calls(1);
         content_mock.assert_calls(0);
@@ -362,7 +410,11 @@ fn attachment_limits_fail_before_content_requests() {
             then.status(200);
         });
 
-        let output = run(&server, root.path(), &["issue", "attachments", "ABC-123"]);
+        let output = run(
+            &server,
+            root.path(),
+            &["issue", "attachments", "download", "ABC-123"],
+        );
 
         metadata_mock.assert_calls(1);
         content_mock.assert_calls(0);
@@ -387,7 +439,11 @@ fn oversized_metadata_response_fails_without_truncating_or_downloading() {
         then.status(200);
     });
 
-    let output = run(&server, root.path(), &["issue", "attachments", "ABC-123"]);
+    let output = run(
+        &server,
+        root.path(),
+        &["issue", "attachments", "download", "ABC-123"],
+    );
 
     metadata_mock.assert_calls(1);
     content_mock.assert_calls(0);
@@ -405,7 +461,11 @@ fn zero_byte_download_keeps_exact_stdout_contract() {
     );
     let content_mock = content(&server, "/rest/api/3/attachment/content/10001", b"");
 
-    let output = run(&server, root.path(), &["issue", "attachments", "ABC-123"]);
+    let output = run(
+        &server,
+        root.path(),
+        &["issue", "attachments", "download", "ABC-123"],
+    );
 
     metadata_mock.assert_calls(1);
     content_mock.assert_calls(1);
@@ -435,7 +495,11 @@ fn output_directory_is_private_and_a_user_provided_symlink_is_used() {
     );
     let content_mock = content(&server, "/rest/api/3/attachment/content/10001", b"data");
 
-    let output = run(&server, root.path(), &["issue", "attachments", "ABC-123"]);
+    let output = run(
+        &server,
+        root.path(),
+        &["issue", "attachments", "download", "ABC-123"],
+    );
 
     metadata_mock.assert_calls(1);
     content_mock.assert_calls(1);
@@ -467,7 +531,14 @@ fn output_directory_is_private_and_a_user_provided_symlink_is_used() {
     let output = run(
         &second_server,
         root.path(),
-        &["issue", "attachments", "ABC-123", "--out", "linked-output"],
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--out",
+            "linked-output",
+        ],
     );
 
     metadata_mock.assert_calls(1);
@@ -479,4 +550,129 @@ fn output_directory_is_private_and_a_user_provided_symlink_is_used() {
     );
     assert!(output.stderr.is_empty());
     assert_eq!(fs::read(target.join("10002-file.bin")).unwrap(), b"data");
+}
+
+#[test]
+fn list_prints_metadata_as_json_without_downloading() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let metadata_mock = metadata(
+        &server,
+        serde_json::json!([
+            {
+                "id": "10002",
+                "filename": "nightly-report.html",
+                "size": 2048,
+                "created": "2026-10-26T02:13:45.123+0100",
+                "mimeType": "text/html",
+                "content": "https://untrusted.example/content"
+            },
+            attachment("10001", "log.txt", 7)
+        ]),
+    );
+    let content_mock = server.mock(|when, then| {
+        when.method(GET).path_includes("/attachment/content/");
+        then.status(200);
+    });
+
+    let output = run(
+        &server,
+        root.path(),
+        &["issue", "attachments", "list", "ABC-123", "--json"],
+    );
+
+    metadata_mock.assert_calls(1);
+    content_mock.assert_calls(0);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        r#"{
+  "issue": "ABC-123",
+  "returned": 2,
+  "attachments": [
+    {
+      "id": "10002",
+      "filename": "nightly-report.html",
+      "size": 2048,
+      "created": "2026-10-26T02:13:45.123+0100",
+      "mimeType": "text/html"
+    },
+    {
+      "id": "10001",
+      "filename": "log.txt",
+      "size": 7,
+      "created": null,
+      "mimeType": null
+    }
+  ]
+}
+"#
+    );
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn list_without_attachments_prints_an_empty_list() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let metadata_mock = metadata(&server, serde_json::json!([]));
+
+    let output = run(
+        &server,
+        root.path(),
+        &["issue", "attachments", "list", "ABC-123", "--json"],
+    );
+
+    metadata_mock.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"{\n  \"issue\": \"ABC-123\",\n  \"returned\": 0,\n  \"attachments\": []\n}\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn list_reports_a_jira_failure_with_exit_3_and_empty_stdout() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let metadata_mock = server.mock(|when, then| {
+        when.method(GET).path(ISSUE_PATH);
+        then.status(404);
+    });
+
+    let output = run(
+        &server,
+        root.path(),
+        &["issue", "attachments", "list", "ABC-123", "--json"],
+    );
+
+    metadata_mock.assert_calls(1);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.starts_with("error: "));
+    assert_eq!(stderr.lines().count(), 1);
+}
+
+#[test]
+fn list_requires_json_and_the_bare_form_is_a_usage_error() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let metadata_mock = server.mock(|when, then| {
+        when.any_request();
+        then.status(200);
+    });
+
+    for args in [
+        &["issue", "attachments", "list", "ABC-123"][..],
+        &["issue", "attachments", "ABC-123"][..],
+    ] {
+        let output = run(&server, root.path(), args);
+
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty());
+    }
+    metadata_mock.assert_calls(0);
 }
