@@ -282,8 +282,8 @@ It sends one authentication request and one or more GraphQL requests per
    for this call.
 2. `POST api/v2/graphql` with the bearer token and the `getTestRuns` query for the
    numeric issue ID, once per page. A Test sends the ID as `testIssueIds`, a Test
-   Execution or Sub Test Execution as `testExecIssueIds`. Both kinds select the same run
-   fields; `--details` adds `comment`, `defects`, `evidence`, `steps` and
+   Execution or Sub Test Execution as `testExecIssueIds`. Both kinds select the
+   same run fields; `--details` adds `comment`, `defects`, `evidence`, `steps` and
    `results` to them. Tests pin all four query texts. `--status` values travel
    as a GraphQL variable, never as query text. Each response is read up to
    16 MiB.
@@ -297,8 +297,8 @@ runs are collected, when `start` plus the page's runs reaches the page's `total`
 when a page has no `total`, or when a page returns no runs. A failed page fails
 the whole command.
 
-The Xray client follows no redirects, because all its requests carry credentials. It
-uses the same 10 second connect and 30 second request timeouts. Status codes map
+The Xray client follows no redirects, because all its requests carry credentials.
+It uses the same 10 second connect and 30 second request timeouts. Status codes map
 like the Jira ones. A GraphQL `errors` array in a 200 response becomes the generic
 `Xray GraphQL query failed`; the server's message is discarded because it may echo
 input. reqwest errors have their URL removed before jcli stores them.
