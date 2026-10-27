@@ -361,11 +361,11 @@ Invalid arguments get clap's multi-line usage message and exit 2.
 
 ## Comments
 
+Showing the first <shown> of <total> comments.
+
 ### <author> · <created>
 
 <comment body rendered as Markdown, or No content.>
-
-Showing the first <shown> of <total> comments.
 ```
 
 `## Links` is always shown. It lists the issue links, then the remote links,
@@ -384,7 +384,8 @@ timestamp as Jira returns it, or says `None`. A missing or empty body shows as
 Headings in a comment body move three levels down, to at most level 6, so they
 nest under the comment's `###` line and cannot pose as a section. The
 `Showing the first ...` line appears only when Jira's `total` is higher than the
-number of comments shown, for example past 1000 comments.
+number of comments shown, for example past 1000 comments. It comes directly under
+the heading, where no comment body can imitate it.
 
 Metadata, link values, comment authors and comment timestamps are reduced to
 one line, have control and bidirectional formatting characters removed and have
