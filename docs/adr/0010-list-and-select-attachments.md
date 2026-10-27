@@ -35,9 +35,12 @@ The bare `jcli issue attachments <KEY>` form is removed and fails with clap's
 usage error and exit 2. Agents learn the syntax from `jcli --help` and the jira
 skill, which change with the binary, so jcli keeps no alias for the old form.
 
-This partially supersedes ADR 0009, which made `jcli issue attachments <KEY>` the
-download command, and the clause in ADR 0007 that lists `issue attachments` among
-the Markdown commands: `list` prints JSON and `download` keeps the Markdown list.
+This partially supersedes [ADR 0009](0009-attachment-downloads.md), which made
+`jcli issue attachments <KEY>` the download command. It also partially supersedes
+two clauses of [ADR 0007](0007-output-for-agents.md): the one that lists
+`issue attachments` among the Markdown commands, because `list` prints JSON and
+`download` keeps the Markdown list, and the one that names the commands that
+require `--json`, which now include `issue attachments list`.
 
 ## Consequences
 
