@@ -12,6 +12,15 @@ pub struct Account {
     pub email_address: Option<String>,
 }
 
+/// The numeric ID and the issue type name of one issue. Xray's GraphQL API
+/// references issues by this ID, and the type name decides which Xray
+/// filter applies. `issue_type` is `None` when Jira sends no type name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueReference {
+    pub id: String,
+    pub issue_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Issue {
     pub key: String,
