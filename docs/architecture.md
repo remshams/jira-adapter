@@ -2,7 +2,7 @@
 
 jcli is a small Rust CLI that reads Jira Cloud for coding agents. It prints an
 issue as Markdown, searches issues with JQL, downloads an issue's attachments and
-lists the test runs Xray Cloud stores for a test issue. It never changes data in
+lists the test runs Xray Cloud stores for a Test or Test Execution issue. It never changes data in
 Jira or Xray. The binary is built with the stable toolchain and blocking reqwest,
 without an async runtime ([ADR 0002](adr/0002-build-jcli-as-a-single-rust-binary.md)).
 
@@ -14,7 +14,7 @@ without an async runtime ([ADR 0002](adr/0002-build-jcli-as-a-single-rust-binary
 | `jcli issue search --jql <JQL> --json [--limit N]` | The first page of matching issues as JSON |
 | `jcli issue attachments list <KEY> --json [--name GLOB]... [--id ID]...` | The issue's attachment metadata as JSON |
 | `jcli issue attachments download <KEY> [--out DIR] [--name GLOB]... [--id ID]...` | A Markdown list of the downloaded files |
-| `jcli xray test-runs <KEY> --json [--status S]... [--sort started-on] [--direction asc\|desc]` | The first page of the test issue's test runs as JSON |
+| `jcli xray test-runs <KEY> --json [--status S]... [--sort started-on] [--direction asc\|desc]` | The first page of test runs of a Test or Test Execution issue as JSON |
 | `jcli whoami` | The account the credentials belong to, on one line |
 
 `<KEY>` is a canonical issue key such as `ABC-123`: a project part of 2 to 10
@@ -64,19 +64,22 @@ empty on failure.
 | 0 | Success |
 | 1 | Invalid issue key |
 | 2 | Configuration error, or a usage error reported by clap |
-| 3 | Jira or Xray request failure, or a Jira response jcli refuses to use |
+| 3 | Jira or Xray request failure, a Jira response jcli refuses to use, or an issue that is not an Xray Test or Test Execution |
 | 4 | Filesystem failure, unsupported platform for attachments, or a failed stdout write |
 
-`xray test-runs` resolves the issue key to Jira's numeric issue ID with one Jira
-request, then calls Xray. `issue attachments download` checks for Unix before it
-loads the configuration and exits 4 on other platforms. `issue attachments list`
-runs on every platform.
+`xray test-runs` resolves the issue key to Jira's numeric issue ID and issue type
+with one Jira request. A `Test` or `Test Execution` issue goes on to Xray with the
+matching filter. Any other or missing type exits 3 before jcli sends an Xray
+request ([ADR 0011](adr/0011-xray-issue-kinds.md)). `issue attachments download`
+checks for Unix before it loads the configuration and exits 4 on other platforms.
+`issue attachments list` runs on every platform.
 
 ## Modules and dependencies
 
 jcli has one bounded context: reading Jira issues and their Xray test runs for an
 agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
-`attachment`, `JQL`, `test issue` and `test run`.
+`attachment`, `JQL` and `test run`, plus Xray's issue kinds `Test` and
+`Test Execution`.
 
 - `src/main.rs`: the clap command tree and dispatch.
 - `src/commands.rs`: the application services, one function per command, plus
@@ -91,10 +94,13 @@ agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
   GET-only HTTP client with status mapping, body limits and JQL error redaction.
   `issue.rs`, `attachment.rs` and `search.rs` are serde models that deserialize
   only the fields jcli requests. Jira's names such as `issuetype` and `isLast`
-  stop at their serde attributes.
+  stop at their serde attributes. `issue.rs` also holds `IssueReference`, the
+  value object with the numeric ID and issue type name that `xray test-runs`
+  needs.
 - `src/xray/`: the Xray side. `client.rs` exchanges the API key for a bearer token
-  and runs the `getTestRuns` GraphQL query. `test_runs.rs` holds the response
-  models, the page sort and the `TestRunsOutput` JSON contract.
+  and runs the `getTestRuns` GraphQL query with the filter for the issue kind.
+  `test_runs.rs` holds `XrayIssueKind`, the response models, the page sort and
+  the `TestRunsOutput` JSON contract.
 - `src/adf/`: translates Jira's Atlassian Document Format (ADF) into Markdown and
   renders the issue page for `issue read`
   ([ADR 0008](adr/0008-hand-rolled-adf-to-markdown-renderer.md)).
@@ -114,7 +120,9 @@ agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
 There is no separate domain model between the Jira response and the output. The
 serde models in `src/jira/` and `src/xray/` hold only the requested fields, and
 `adf`, `issue_search`, `attachment_list` and `xray::test_runs` turn them straight into the output
-contract. That translation is where Jira and Xray shapes end.
+contract. That translation is where Jira and Xray shapes end. The one exception
+is `xray test-runs`: `XrayIssueKind` turns the type name from `IssueReference`
+into `Test` or `TestExecution`, which picks the Xray filter.
 
 Arrows show the imports that exist between modules.
 
@@ -230,7 +238,7 @@ timeout: a large video keeps downloading while data arrives.
 | `issue search` | `GET rest/api/3/search/jql?jql=...&maxResults=N&fields=summary,status,issuetype,created,updated,labels` |
 | `issue attachments list` | `GET rest/api/3/issue/{key}?fields=attachment` |
 | `issue attachments download` | `GET rest/api/3/issue/{key}?fields=attachment`, then `GET rest/api/3/attachment/content/{id}?redirect=false` per attachment |
-| `xray test-runs` | `GET rest/api/3/issue/{key}?fields=summary` for the numeric issue ID |
+| `xray test-runs` | `GET rest/api/3/issue/{key}?fields=issuetype` for the numeric issue ID and the issue type |
 
 jcli builds every URL from the configured base URL. It ignores the resource URLs
 in Jira's responses, and appends the issue key and attachment ID as single encoded
@@ -260,8 +268,10 @@ It sends two requests per `xray test-runs` call, and neither changes Xray data:
    bearer token as a bare JSON string, read up to 64 KiB. The token lives only
    for this call.
 2. `POST api/v2/graphql` with the bearer token and the `getTestRuns` query for the
-   numeric issue ID. `limit` is 100 and `start` is 0. `--status` values travel as
-   a GraphQL variable, never as query text. The response is read up to 16 MiB.
+   numeric issue ID. A Test sends the ID as `testIssueIds`, a Test Execution as
+   `testExecIssueIds`; each kind has its own query text. `limit` is 100 and
+   `start` is 0. `--status` values travel as a GraphQL variable, never as query
+   text. The response is read up to 16 MiB.
 
 The Xray client follows no redirects, because both requests carry credentials. It
 uses the same 10 second connect and 30 second request timeouts. Status codes map
@@ -310,8 +320,10 @@ order, so sorting is done with `ORDER BY` in the JQL. jcli passes the JQL to Jir
 unchanged and fetches only the first page; `--limit` defaults to 20 and accepts 1
 to 100. An empty result exits 0 with `"issues": []`.
 
-`xray test-runs` prints pretty JSON with `testKey`, `total`, `returned`,
-`truncated`, `start`, `limit` and `runs`. Each run has `id`, `status`,
+`xray test-runs` prints pretty JSON with `issueKey`, `issueKind`, `total`,
+`returned`, `truncated`, `start`, `limit` and `runs`. `issueKind` is `test` or
+`testExecution` and names the filter that was queried, so an empty `runs` list
+means the key has no runs. Each run has `id`, `status`,
 `startedOn`, `finishedOn` and `testExecutionIssueId`; a null entry from Xray stays
 null. `truncated` is `total > returned`, or null without a total. `--sort
 started-on` reorders only the returned page, newest first unless `--direction asc`

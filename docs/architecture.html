@@ -244,7 +244,7 @@
   <h1><code>jcli</code> architecture</h1>
   <p class="lede">jcli is a small Rust CLI that reads Jira Cloud for coding agents. It prints an
   issue as Markdown, searches issues with JQL, downloads an issue's attachments and
-  lists the test runs Xray Cloud stores for a test issue. It never changes data in
+  lists the test runs Xray Cloud stores for a Test or Test Execution issue. It never changes data in
   Jira or Xray. The binary is built with the stable toolchain and blocking reqwest,
   without an async runtime (<a href="adr/0002-build-jcli-as-a-single-rust-binary.md">ADR 0002</a>).</p>
 </header>
@@ -259,7 +259,7 @@
         <tr><td><code>jcli issue search --jql &lt;JQL&gt; --json [--limit N]</code></td><td>The first page of matching issues as JSON</td></tr>
         <tr><td><code>jcli issue attachments list &lt;KEY&gt; --json [--name GLOB]... [--id ID]...</code></td><td>The issue's attachment metadata as JSON</td></tr>
         <tr><td><code>jcli issue attachments download &lt;KEY&gt; [--out DIR] [--name GLOB]... [--id ID]...</code></td><td>A Markdown list of the downloaded files</td></tr>
-        <tr><td><code>jcli xray test-runs &lt;KEY&gt; --json [--status S]... [--sort started-on] [--direction asc|desc]</code></td><td>The first page of the test issue's test runs as JSON</td></tr>
+        <tr><td><code>jcli xray test-runs &lt;KEY&gt; --json [--status S]... [--sort started-on] [--direction asc|desc]</code></td><td>The first page of test runs of a Test or Test Execution issue as JSON</td></tr>
         <tr><td><code>jcli whoami</code></td><td>The account the credentials belong to, on one line</td></tr>
       </tbody>
     </table>
@@ -389,23 +389,26 @@
         <tr><td class="num">0</td><td>Success</td></tr>
         <tr><td class="num">1</td><td>Invalid issue key</td></tr>
         <tr><td class="num">2</td><td>Configuration error, or a usage error reported by clap</td></tr>
-        <tr><td class="num">3</td><td>Jira or Xray request failure, or a Jira response jcli refuses to use</td></tr>
+        <tr><td class="num">3</td><td>Jira or Xray request failure, a Jira response jcli refuses to use, or an issue that is not an Xray Test or Test Execution</td></tr>
         <tr><td class="num">4</td><td>Filesystem failure, unsupported platform for attachments, or a failed stdout write</td></tr>
       </tbody>
     </table>
   </div>
 
-  <p><code>xray test-runs</code> resolves the issue key to Jira's numeric issue ID with one Jira
-  request, then calls Xray. <code>issue attachments download</code> checks for Unix before it
-  loads the configuration and exits 4 on other platforms. <code>issue attachments list</code>
-  runs on every platform.</p>
+  <p><code>xray test-runs</code> resolves the issue key to Jira's numeric issue ID and issue type
+  with one Jira request. A <code>Test</code> or <code>Test Execution</code> issue goes on to Xray with the
+  matching filter. Any other or missing type exits 3 before jcli sends an Xray
+  request (<a href="adr/0011-xray-issue-kinds.md">ADR 0011</a>). <code>issue attachments download</code>
+  checks for Unix before it loads the configuration and exits 4 on other platforms.
+  <code>issue attachments list</code> runs on every platform.</p>
 </section>
 
 <section id="modules-and-dependencies" aria-labelledby="modules-and-dependencies-h">
   <h2 id="modules-and-dependencies-h">Modules and dependencies</h2>
   <p>jcli has one bounded context: reading Jira issues and their Xray test runs for an
   agent. The ubiquitous language uses Jira's terms: <code>issue</code>, <code>issue key</code>,
-  <code>attachment</code>, <code>JQL</code>, <code>test issue</code> and <code>test run</code>.</p>
+  <code>attachment</code>, <code>JQL</code> and <code>test run</code>, plus Xray's issue kinds <code>Test</code> and
+  <code>Test Execution</code>.</p>
 
   <ul>
     <li><a href="../src/main.rs"><code>src/main.rs</code></a>: the clap command tree and dispatch.</li>
@@ -421,10 +424,13 @@
     GET-only HTTP client with status mapping, body limits and JQL error redaction.
     <a href="../src/jira/issue.rs"><code>issue.rs</code></a>, <a href="../src/jira/attachment.rs"><code>attachment.rs</code></a> and <a href="../src/jira/search.rs"><code>search.rs</code></a> are serde models that deserialize
     only the fields jcli requests. Jira's names such as <code>issuetype</code> and <code>isLast</code>
-    stop at their serde attributes.</li>
+    stop at their serde attributes. <a href="../src/jira/issue.rs"><code>issue.rs</code></a> also holds <code>IssueReference</code>, the
+    value object with the numeric ID and issue type name that <code>xray test-runs</code>
+    needs.</li>
     <li><a href="../src/xray/"><code>src/xray/</code></a>: the Xray side. <a href="../src/xray/client.rs"><code>client.rs</code></a> exchanges the API key for a bearer token
-    and runs the <code>getTestRuns</code> GraphQL query. <a href="../src/xray/test_runs.rs"><code>test_runs.rs</code></a> holds the response
-    models, the page sort and the <code>TestRunsOutput</code> JSON contract.</li>
+    and runs the <code>getTestRuns</code> GraphQL query with the filter for the issue kind.
+    <a href="../src/xray/test_runs.rs"><code>test_runs.rs</code></a> holds <code>XrayIssueKind</code>, the response models, the page sort and
+    the <code>TestRunsOutput</code> JSON contract.</li>
     <li><a href="../src/adf/"><code>src/adf/</code></a>: translates Jira's Atlassian Document Format (ADF) into Markdown and
     renders the issue page for <code>issue read</code>
     (<a href="adr/0008-hand-rolled-adf-to-markdown-renderer.md">ADR 0008</a>).</li>
@@ -445,7 +451,9 @@
   <p>There is no separate domain model between the Jira response and the output. The
   serde models in <code>src/jira/</code> and <code>src/xray/</code> hold only the requested fields, and
   <code>adf</code>, <code>issue_search</code>, <code>attachment_list</code> and <code>xray::test_runs</code> turn them straight into the output
-  contract. That translation is where Jira and Xray shapes end.</p>
+  contract. That translation is where Jira and Xray shapes end. The one exception
+  is <code>xray test-runs</code>: <code>XrayIssueKind</code> turns the type name from <code>IssueReference</code>
+  into <code>Test</code> or <code>TestExecution</code>, which picks the Xray filter.</p>
 
   <p>Arrows show the imports that exist between modules.</p>
 
@@ -632,7 +640,7 @@
         <tr><td><code>issue search</code></td><td><code>GET rest/api/3/search/jql?jql=...&amp;maxResults=N&amp;fields=summary,status,issuetype,created,updated,labels</code></td></tr>
         <tr><td><code>issue attachments list</code></td><td><code>GET rest/api/3/issue/{key}?fields=attachment</code></td></tr>
         <tr><td><code>issue attachments download</code></td><td><code>GET rest/api/3/issue/{key}?fields=attachment</code>, then <code>GET rest/api/3/attachment/content/{id}?redirect=false</code> per attachment</td></tr>
-        <tr><td><code>xray test-runs</code></td><td><code>GET rest/api/3/issue/{key}?fields=summary</code> for the numeric issue ID</td></tr>
+        <tr><td><code>xray test-runs</code></td><td><code>GET rest/api/3/issue/{key}?fields=issuetype</code> for the numeric issue ID and the issue type</td></tr>
       </tbody>
     </table>
   </div>
@@ -664,8 +672,10 @@
     bearer token as a bare JSON string, read up to 64 KiB. The token lives only
     for this call.</li>
     <li><code>POST api/v2/graphql</code> with the bearer token and the <code>getTestRuns</code> query for the
-    numeric issue ID. <code>limit</code> is 100 and <code>start</code> is 0. <code>--status</code> values travel as
-    a GraphQL variable, never as query text. The response is read up to 16 MiB.</li>
+    numeric issue ID. A Test sends the ID as <code>testIssueIds</code>, a Test Execution as
+    <code>testExecIssueIds</code>; each kind has its own query text. <code>limit</code> is 100 and
+    <code>start</code> is 0. <code>--status</code> values travel as a GraphQL variable, never as query
+    text. The response is read up to 16 MiB.</li>
   </ol>
 
   <p>The Xray client follows no redirects, because both requests carry credentials. It
@@ -713,8 +723,10 @@
   unchanged and fetches only the first page; <code>--limit</code> defaults to 20 and accepts 1
   to 100. An empty result exits 0 with <code>"issues": []</code>.</p>
 
-  <p><code>xray test-runs</code> prints pretty JSON with <code>testKey</code>, <code>total</code>, <code>returned</code>,
-  <code>truncated</code>, <code>start</code>, <code>limit</code> and <code>runs</code>. Each run has <code>id</code>, <code>status</code>,
+  <p><code>xray test-runs</code> prints pretty JSON with <code>issueKey</code>, <code>issueKind</code>, <code>total</code>,
+  <code>returned</code>, <code>truncated</code>, <code>start</code>, <code>limit</code> and <code>runs</code>. <code>issueKind</code> is <code>test</code> or
+  <code>testExecution</code> and names the filter that was queried, so an empty <code>runs</code> list
+  means the key has no runs. Each run has <code>id</code>, <code>status</code>,
   <code>startedOn</code>, <code>finishedOn</code> and <code>testExecutionIssueId</code>; a null entry from Xray stays
   null. <code>truncated</code> is <code>total &gt; returned</code>, or null without a total. <code>--sort
   started-on</code> reorders only the returned page, newest first unless <code>--direction asc</code>
