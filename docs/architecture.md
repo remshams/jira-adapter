@@ -83,8 +83,8 @@ agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
   form. Its parse error never echoes the input.
 - `src/config.rs`: `Config` for Jira and `XrayConfig` for Xray, resolved from the
   process environment, the `.env` in the working directory and the per-user
-  `config.toml`. It owns `SanitizedUrl`, which the `Debug` output of configuration
-  and clients uses.
+  `config.toml`. It owns `SanitizedUrl`, which the `Debug` output of `Config`,
+  `XrayConfig` and `XrayClient` uses.
 - `src/jira/`: the Jira side of the anti-corruption layer. `client.rs` is the
   GET-only HTTP client with status mapping, body limits and JQL error redaction.
   `issue.rs`, `attachment.rs` and `search.rs` are serde models that deserialize
@@ -172,8 +172,9 @@ current working directory, then the per-user `config.toml`
 - The TOML file is `$XDG_CONFIG_HOME/jcli/config.toml` when `XDG_CONFIG_HOME` is
   set, non-empty and absolute, otherwise `~/.config/jcli/config.toml` when `HOME`
   is absolute. There is no system-wide file. Unknown keys are an error.
-- A value that is present in a higher source wins even when it is blank or not
-  valid Unicode. That setting then fails as `configuration value <NAME> is set but
+- A value that is present in a higher source wins even when it is blank or, in the
+  environment, not valid Unicode. A `.env` or TOML file that is not valid UTF-8
+  fails as a whole. That setting then fails as `configuration value <NAME> is set but
   empty`; it never falls through to a lower source. Only an absent value falls
   through, and a setting absent everywhere fails as `missing configuration value
   <NAME>`.
@@ -315,7 +316,7 @@ missing values.
 ## Attachment downloads
 
 `issue attachments` writes into `./<KEY>/`, or into the directory given with
-`--out`, which jcli uses as is. It plans every download before the first request
+`--out`, which jcli uses as is. It plans every download before the first download
 and rejects the whole set when:
 
 - an attachment ID is empty, longer than 256 bytes, `.` or `..`, or repeated,
@@ -357,7 +358,7 @@ bodies, or that keep sending data past the request timeout.
 
 The CLI tests in `tests/` are black-box tests. `tests/common/mod.rs` runs the
 built `jcli` binary with a cleared environment, in a fresh temporary directory or
-one the test provides. Each test starts its own `httpmock` server, and the tests
+one the test provides. Tests that reach Jira or Xray start their own `httpmock` server, and the tests
 assert only on stdout, stderr, exit codes and written files.
 
 The gates ([ADR 0004](adr/0004-quality-gates.md)):
