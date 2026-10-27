@@ -396,11 +396,11 @@
   </div>
 
   <p><code>xray test-runs</code> resolves the issue key to Jira's numeric issue ID and issue type
-  with one Jira request. A <code>Test</code> or <code>Test Execution</code> issue goes on to Xray with the
-  matching filter. Any other or missing type exits 3 before jcli sends an Xray
-  request (<a href="adr/0011-xray-issue-kinds.md">ADR 0011</a>). <code>issue attachments download</code>
-  checks for Unix before it loads the configuration and exits 4 on other platforms.
-  <code>issue attachments list</code> runs on every platform.</p>
+  with one Jira request. A <code>Test</code>, <code>Test Execution</code> or <code>Sub Test Execution</code> issue
+  goes on to Xray with the matching filter. Any other or missing type exits 3 before
+  jcli sends an Xray request (<a href="adr/0011-xray-issue-kinds.md">ADR 0011</a>).
+  <code>issue attachments download</code> checks for Unix before it loads the configuration and
+  exits 4 on other platforms. <code>issue attachments list</code> runs on every platform.</p>
 </section>
 
 <section id="modules-and-dependencies" aria-labelledby="modules-and-dependencies-h">
@@ -672,8 +672,8 @@
     bearer token as a bare JSON string, read up to 64 KiB. The token lives only
     for this call.</li>
     <li><code>POST api/v2/graphql</code> with the bearer token and the <code>getTestRuns</code> query for the
-    numeric issue ID. A Test sends the ID as <code>testIssueIds</code>, a Test Execution as
-    <code>testExecIssueIds</code>; each kind has its own query text. <code>limit</code> is 100 and
+    numeric issue ID. A Test sends the ID as <code>testIssueIds</code>, a Test Execution or Sub
+    Test Execution as <code>testExecIssueIds</code>; each kind has its own query text. <code>limit</code> is 100 and
     <code>start</code> is 0. <code>--status</code> values travel as a GraphQL variable, never as query
     text. The response is read up to 16 MiB.</li>
   </ol>
