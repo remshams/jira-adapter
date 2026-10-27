@@ -32,7 +32,7 @@ Run `jcli --help` and `jcli <command> <subcommand> --help` for the commands, the
 - `issue attachments download` downloads every attachment and replaces files of the same name. Take the file names from the `- <name>` lines on stdout instead of predicting them. On failure stdout is empty, and files from earlier attachments or earlier runs may already be in the directory; don't treat them as a complete set.
 - `xray test-runs` fetches one page of at most 100 test runs. Check `truncated` before drawing conclusions about the full history. `testExecutionIssueId` is a numeric issue ID, which `issue read` rejects; get its key with `jcli issue search --jql "id = <testExecutionIssueId>" --json`.
 
-In JSON output, missing scalar values are `null` rather than empty strings, and missing `labels` are `[]`. Entries in `runs` can themselves be `null`. In both JSON commands, `truncated: null` means jcli can't tell whether more results exist.
+In JSON output, missing scalar values are `null` rather than empty strings, and missing `labels` are `[]`. Entries in `runs` can themselves be `null`. In `issue search` and `xray test-runs`, `truncated: null` means jcli can't tell whether more results exist.
 
 ## Errors
 
