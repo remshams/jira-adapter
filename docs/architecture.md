@@ -281,8 +281,8 @@ It sends one authentication request and one or more GraphQL requests per
    bearer token as a bare JSON string, read up to 64 KiB. The token lives only
    for this call.
 2. `POST api/v2/graphql` with the bearer token and the `getTestRuns` query for the
-   numeric issue ID, once per page. A Test sends the ID as `testIssueIds`, a Test Execution or
-   Sub Test Execution as `testExecIssueIds`. Both kinds select the same run
+   numeric issue ID, once per page. A Test sends the ID as `testIssueIds`, a Test
+   Execution or Sub Test Execution as `testExecIssueIds`. Both kinds select the same run
    fields; `--details` adds `comment`, `defects`, `evidence`, `steps` and
    `results` to them. Tests pin all four query texts. `--status` values travel
    as a GraphQL variable, never as query text. Each response is read up to
@@ -360,8 +360,9 @@ entry stays null. `total` is the total Xray reported on the last fetched page,
 `returned` counts the runs of all fetched pages, `start` is 0 and `limit` is the
 requested `--limit`, which defaults to 100 and accepts 1 to 1000. `truncated` is
 `total > returned`, or null without a total. `--sort started-on` reorders the runs
-of all fetched pages, newest first unless `--direction asc` is given. Runs with a missing or unparseable `startedOn` come after dated runs,
-and null entries come last. Ties break by run ID, then by original position.
+of all fetched pages, newest first unless `--direction asc` is given. Runs with
+a missing or unparseable `startedOn` come after dated runs, and null entries come
+last. Ties break by run ID, then by original position.
 
 `issue attachments list` prints pretty JSON with `issue`, `returned` and
 `attachments` ([ADR 0010](adr/0010-list-and-select-attachments.md)). Each
