@@ -14,6 +14,7 @@ use url::Url;
 use crate::config::Config;
 use crate::issue_key::IssueKey;
 use crate::jira::attachment::{Attachment, AttachmentIssue, MAX_ATTACHMENT_ID_BYTES};
+use crate::jira::comment::{CommentPage, Comments};
 use crate::jira::issue::{Account, Issue, IssueReference, IssueType};
 use crate::jira::link::RemoteLink;
 use crate::jira::search::{SearchPage, SearchResults};
@@ -25,6 +26,10 @@ const ISSUE_FIELDS: &str =
 const SEARCH_FIELDS: &str = "summary,status,issuetype,created,updated,labels";
 /// The most issues jcli asks Jira for in one search request.
 const SEARCH_PAGE_SIZE: usize = 100;
+/// The most comments jcli asks Jira for in one comment request.
+const COMMENT_PAGE_SIZE: usize = 100;
+/// The most comments `issue read --comments` collects.
+pub(crate) const MAX_COMMENTS: usize = 1000;
 pub(crate) const MAX_ATTACHMENT_METADATA_BYTES: usize = 16 * 1024 * 1024;
 /// Jira error bodies are short JSON documents; anything larger is not one.
 const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
@@ -170,6 +175,43 @@ impl JiraClient {
             "remotelink",
         ])?;
         self.get_bounded_metadata_json_url(url, "remote links")
+    }
+
+    /// Returns up to 1000 of the issue's comments, oldest first. Each request
+    /// asks for up to 100 comments from the offset reached so far. Paging
+    /// stops once 1000 comments are collected, when a page reaches Jira's
+    /// `total`, has no `total`, or adds no comments; the last rule ends a
+    /// server that keeps reporting a higher total than it sends. A failed page
+    /// fails the whole request.
+    pub fn comments(&self, issue_key: &IssueKey) -> Result<Comments, JiraClientError> {
+        let mut comments = Vec::new();
+        loop {
+            let max_results = (MAX_COMMENTS - comments.len()).min(COMMENT_PAGE_SIZE);
+            let page = self.comment_page(issue_key, comments.len(), max_results)?;
+            let last = is_final_comment_page(&page, comments.len());
+            comments.extend(page.comments.unwrap_or_default());
+            if last || comments.len() >= MAX_COMMENTS {
+                return Ok(Comments {
+                    comments,
+                    total: page.total,
+                });
+            }
+        }
+    }
+
+    fn comment_page(
+        &self,
+        issue_key: &IssueKey,
+        start_at: usize,
+        max_results: usize,
+    ) -> Result<CommentPage, JiraClientError> {
+        let mut url =
+            self.endpoint_url(&["rest", "api", "3", "issue", issue_key.as_str(), "comment"])?;
+        url.query_pairs_mut()
+            .append_pair("startAt", &start_at.to_string())
+            .append_pair("maxResults", &max_results.to_string())
+            .append_pair("orderBy", "created");
+        self.get_bounded_metadata_json_url(url, "comments")
     }
 
     /// Returns the numeric issue ID (for example `"10400"`) and the issue
@@ -401,6 +443,13 @@ fn is_final_page(page: &SearchPage) -> bool {
     page.is_last == Some(true)
         || page.next_page_token.is_none()
         || page.issues.as_ref().is_none_or(Vec::is_empty)
+}
+
+/// Whether comment paging ends after `page`, fetched from `start_at`: the
+/// page reached Jira's `total`, has no `total`, or sent no comments.
+fn is_final_comment_page(page: &CommentPage, start_at: usize) -> bool {
+    let returned = page.comments.as_ref().map_or(0, Vec::len);
+    returned == 0 || page.total.is_none_or(|total| start_at + returned >= total)
 }
 
 /// Maps a 400 from the search endpoint. Jira explains a rejected JQL query
@@ -711,6 +760,276 @@ mod tests {
         });
 
         let error = remote_links(&server).unwrap_err();
+
+        mock.assert_calls(1);
+        assert!(matches!(error, JiraClientError::MetadataTooLarge));
+    }
+
+    /// Mocks one comment page requested from `start_at` for `max_results`
+    /// comments, oldest first. No other query parameter is accepted.
+    fn comment_page_mock(
+        server: &MockServer,
+        start_at: usize,
+        max_results: usize,
+        status: u16,
+        body: serde_json::Value,
+    ) -> httpmock::Mock<'_> {
+        server.mock(move |when, then| {
+            when.method(GET)
+                .path("/rest/api/3/issue/ABC-123/comment")
+                .query_param("startAt", start_at.to_string())
+                .query_param("maxResults", max_results.to_string())
+                .query_param("orderBy", "created")
+                .query_param_count(r".*", r".*", 3)
+                .header("Authorization", AUTH_HEADER);
+            then.status(status).json_body(body);
+        })
+    }
+
+    /// Comments by `Author <first>` to `Author <last>` as Jira sends them.
+    fn comment_hits(first: usize, last: usize) -> Vec<serde_json::Value> {
+        (first..=last)
+            .map(|number| {
+                serde_json::json!({
+                    "author": {"displayName": format!("Author {number}")},
+                    "created": "2026-10-17T02:13:45.123+0200"
+                })
+            })
+            .collect()
+    }
+
+    fn expected_authors(first: usize, last: usize) -> Vec<String> {
+        (first..=last)
+            .map(|number| format!("Author {number}"))
+            .collect()
+    }
+
+    fn comments(server: &MockServer) -> Result<Comments, JiraClientError> {
+        client(server).comments(&"ABC-123".parse().unwrap())
+    }
+
+    fn comment_authors(comments: &Comments) -> Vec<String> {
+        comments
+            .comments
+            .iter()
+            .map(|comment| comment.author.clone().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn comment_limits_match_the_documented_values() {
+        assert_eq!(COMMENT_PAGE_SIZE, 100);
+        assert_eq!(MAX_COMMENTS, 1000);
+    }
+
+    #[test]
+    fn comments_request_the_first_page_oldest_first_and_keep_jira_order() {
+        let server = MockServer::start();
+        let mock = comment_page_mock(
+            &server,
+            0,
+            100,
+            200,
+            serde_json::json!({"startAt": 0, "maxResults": 100, "total": 2, "comments": comment_hits(1, 2)}),
+        );
+
+        let comments = comments(&server).unwrap();
+
+        mock.assert_calls(1);
+        assert_eq!(comment_authors(&comments), expected_authors(1, 2));
+        assert_eq!(comments.total, Some(2));
+    }
+
+    #[test]
+    fn comments_page_until_the_total_is_reached() {
+        let server = MockServer::start();
+        let pages = [(0, 1, 100), (100, 101, 200), (200, 201, 250)].map(|(start, first, last)| {
+            comment_page_mock(
+                &server,
+                start,
+                100,
+                200,
+                serde_json::json!({"total": 250, "comments": comment_hits(first, last)}),
+            )
+        });
+
+        let comments = comments(&server).unwrap();
+
+        for page in pages {
+            page.assert_calls(1);
+        }
+        assert_eq!(comment_authors(&comments), expected_authors(1, 250));
+        assert_eq!(comments.total, Some(250));
+    }
+
+    #[test]
+    fn comments_stop_at_exactly_1000_over_ten_pages() {
+        let server = MockServer::start();
+        let pages = (0..10)
+            .map(|page| {
+                comment_page_mock(
+                    &server,
+                    page * 100,
+                    100,
+                    200,
+                    serde_json::json!({
+                        "total": 1500,
+                        "comments": comment_hits(page * 100 + 1, page * 100 + 100)
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let comments = comments(&server).unwrap();
+
+        for page in pages {
+            page.assert_calls(1);
+        }
+        assert_eq!(comment_authors(&comments), expected_authors(1, 1000));
+        assert_eq!(comments.total, Some(1500));
+    }
+
+    #[test]
+    fn comments_ask_only_for_the_remainder_below_1000() {
+        // Jira sends 90 comments per page, so the twelfth page asks for 10.
+        let server = MockServer::start();
+        let mut pages = (0..11)
+            .map(|page| {
+                comment_page_mock(
+                    &server,
+                    page * 90,
+                    100,
+                    200,
+                    serde_json::json!({
+                        "total": 2000,
+                        "comments": comment_hits(page * 90 + 1, page * 90 + 90)
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        pages.push(comment_page_mock(
+            &server,
+            990,
+            10,
+            200,
+            serde_json::json!({"total": 2000, "comments": comment_hits(991, 1000)}),
+        ));
+
+        let comments = comments(&server).unwrap();
+
+        for page in pages {
+            page.assert_calls(1);
+        }
+        assert_eq!(comment_authors(&comments), expected_authors(1, 1000));
+        assert_eq!(comments.total, Some(2000));
+    }
+
+    #[test]
+    fn comments_stop_when_a_page_has_no_total() {
+        for total in [None, Some(serde_json::Value::Null)] {
+            let server = MockServer::start();
+            let mut body = serde_json::json!({"comments": comment_hits(1, 100)});
+            if let Some(total) = total {
+                body["total"] = total;
+            }
+            let mock = comment_page_mock(&server, 0, 100, 200, body);
+
+            let comments = comments(&server).unwrap();
+
+            mock.assert_calls(1);
+            assert_eq!(comments.comments.len(), 100);
+            assert_eq!(comments.total, None);
+        }
+    }
+
+    #[test]
+    fn comments_stop_when_a_page_adds_no_comments() {
+        for empty in [
+            serde_json::json!({"total": 300, "comments": []}),
+            serde_json::json!({"total": 300}),
+            serde_json::json!({"total": 300, "comments": null}),
+        ] {
+            let server = MockServer::start();
+            let first = comment_page_mock(
+                &server,
+                0,
+                100,
+                200,
+                serde_json::json!({"total": 300, "comments": comment_hits(1, 100)}),
+            );
+            let second = comment_page_mock(&server, 100, 100, 200, empty.clone());
+
+            let comments = comments(&server).unwrap();
+
+            first.assert_calls(1);
+            second.assert_calls(1);
+            assert_eq!(
+                comment_authors(&comments),
+                expected_authors(1, 100),
+                "{empty}"
+            );
+            assert_eq!(comments.total, Some(300));
+        }
+    }
+
+    #[test]
+    fn an_issue_without_comments_needs_one_request() {
+        let server = MockServer::start();
+        let mock = comment_page_mock(
+            &server,
+            0,
+            100,
+            200,
+            serde_json::json!({"startAt": 0, "maxResults": 100, "total": 0, "comments": []}),
+        );
+
+        let comments = comments(&server).unwrap();
+
+        mock.assert_calls(1);
+        assert!(comments.comments.is_empty());
+        assert_eq!(comments.total, Some(0));
+    }
+
+    #[test]
+    fn a_failed_second_comment_page_fails_the_request() {
+        for (status, expected) in [
+            (500, "Jira API error (HTTP 500)"),
+            (404, "not found (404): comments"),
+        ] {
+            let server = MockServer::start();
+            let first = comment_page_mock(
+                &server,
+                0,
+                100,
+                200,
+                serde_json::json!({"total": 200, "comments": comment_hits(1, 100)}),
+            );
+            let second = comment_page_mock(
+                &server,
+                100,
+                100,
+                status,
+                serde_json::json!({"errorMessages": ["secret-token leaked"]}),
+            );
+
+            let error = comments(&server).unwrap_err();
+
+            first.assert_calls(1);
+            second.assert_calls(1);
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn comment_responses_are_bounded() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/rest/api/3/issue/ABC-123/comment");
+            then.status(200)
+                .body(vec![b' '; MAX_ATTACHMENT_METADATA_BYTES + 1]);
+        });
+
+        let error = comments(&server).unwrap_err();
 
         mock.assert_calls(1);
         assert!(matches!(error, JiraClientError::MetadataTooLarge));
