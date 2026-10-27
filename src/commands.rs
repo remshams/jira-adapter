@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use crate::adf;
 use crate::attachment_list::AttachmentListOutput;
+use crate::attachment_selection::AttachmentSelection;
 use crate::attachments;
 use crate::config;
 use crate::issue_key::IssueKey;
@@ -27,15 +28,19 @@ pub(crate) fn search_issues(jql: &str, limit: u32) -> ! {
     write_stdout(&IssueSearchOutput::from_page(jql, page).to_pretty_json());
 }
 
-pub(crate) fn list_attachments(value: &str) -> ! {
+pub(crate) fn list_attachments(value: &str, selection: &AttachmentSelection) -> ! {
     let issue_key = parse_issue_key(value);
     let config = load_config();
     let client = or_exit(JiraClient::new(&config), 3);
-    let metadata = or_exit(client.attachments(&issue_key), 3);
+    let metadata = selection.select(or_exit(client.attachments(&issue_key), 3));
     write_stdout(&AttachmentListOutput::from_attachments(&issue_key, metadata).to_pretty_json());
 }
 
-pub(crate) fn download_attachments(value: &str, output_directory: Option<PathBuf>) -> ! {
+pub(crate) fn download_attachments(
+    value: &str,
+    output_directory: Option<PathBuf>,
+    selection: &AttachmentSelection,
+) -> ! {
     let issue_key = parse_issue_key(value);
     let output_directory = output_directory.unwrap_or_else(|| PathBuf::from(issue_key.as_str()));
 
@@ -45,7 +50,8 @@ pub(crate) fn download_attachments(value: &str, output_directory: Option<PathBuf
 
     let config = load_config();
     let client = or_exit(JiraClient::new(&config), 3);
-    let metadata = or_exit(client.attachments(&issue_key), 3);
+    // Download planning and its limits see only the selected attachments.
+    let metadata = selection.select(or_exit(client.attachments(&issue_key), 3));
     let manifest = match attachments::download_all(&client, &metadata, &output_directory) {
         Ok(manifest) => manifest,
         Err(error) => exit(attachment_exit_code(&error), error),

@@ -1,5 +1,6 @@
 mod adf;
 mod attachment_list;
+mod attachment_selection;
 mod attachments;
 mod commands;
 mod config;
@@ -11,7 +12,10 @@ mod xray;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use globset::GlobMatcher;
+
+use crate::attachment_selection::AttachmentSelection;
 
 use crate::xray::test_runs::{TestRunSortDirection, TestRunSortField};
 
@@ -78,15 +82,41 @@ enum AttachmentsCommand {
         /// Emit JSON output (required in this version)
         #[arg(long, required = true)]
         json: bool,
+        #[command(flatten)]
+        filters: AttachmentFilters,
     },
-    /// Download all attachments for an issue (Unix only)
+    /// Download an issue's attachments, all or a selection (Unix only)
     Download {
         /// Canonical issue key (e.g. ABC-123)
         issue: String,
         /// Destination directory; defaults to ./<issue-key>/
         #[arg(long, value_name = "DIRECTORY")]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        filters: AttachmentFilters,
     },
+}
+
+#[derive(Args)]
+struct AttachmentFilters {
+    /// Select attachments whose Jira filename matches this case-sensitive
+    /// glob. Repeat for several. An attachment matching any --name or --id
+    /// is selected; without either, every attachment is.
+    #[arg(
+        long = "name",
+        value_name = "GLOB",
+        value_parser = attachment_selection::parse_name_pattern
+    )]
+    names: Vec<GlobMatcher>,
+    /// Select the attachment with this ID. Repeat for several.
+    #[arg(long = "id", value_name = "ID")]
+    ids: Vec<String>,
+}
+
+impl AttachmentFilters {
+    fn into_selection(self) -> AttachmentSelection {
+        AttachmentSelection::new(self.names, self.ids)
+    }
 }
 
 #[derive(Subcommand)]
@@ -135,8 +165,16 @@ fn run_issue(command: IssueCommand) -> ! {
 
 fn run_attachments(command: AttachmentsCommand) -> ! {
     match command {
-        AttachmentsCommand::List { issue, json: _ } => commands::list_attachments(&issue),
-        AttachmentsCommand::Download { issue, out } => commands::download_attachments(&issue, out),
+        AttachmentsCommand::List {
+            issue,
+            json: _,
+            filters,
+        } => commands::list_attachments(&issue, &filters.into_selection()),
+        AttachmentsCommand::Download {
+            issue,
+            out,
+            filters,
+        } => commands::download_attachments(&issue, out, &filters.into_selection()),
     }
 }
 
