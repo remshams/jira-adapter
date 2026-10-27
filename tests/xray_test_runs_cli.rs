@@ -945,3 +945,203 @@ fn an_unknown_sort_field_is_rejected_by_clap() {
     assert_eq!(output.status.code(), Some(2));
     anything.assert_calls(0);
 }
+
+/// Fields only the `--details` query selects.
+const DETAIL_FIELDS: &[&str] = &[
+    "comment",
+    "defects",
+    "evidence { filename downloadLink }",
+    "actualResult",
+    "log",
+    "duration",
+];
+
+/// Mocks a GraphQL request for TEST-123 (a Test) whose query text must
+/// select every detail field.
+fn mock_graphql_with_details(server: &MockServer, body: serde_json::Value) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        let mut when = when
+            .method(POST)
+            .path("/api/v2/graphql")
+            .header("Authorization", format!("Bearer {XRAY_TOKEN}"))
+            .body_includes("getTestRuns(testIssueIds: $testIssueIds, statuses: $statuses")
+            .body_includes("steps {")
+            .body_includes("status { name }\\n        log");
+        for field in DETAIL_FIELDS {
+            when = when.body_includes(*field);
+        }
+        then.status(200).json_body(body);
+    })
+}
+
+fn detailed_page() -> serde_json::Value {
+    results_page(serde_json::json!([
+        {
+            "id": "run-1",
+            "status": {"name": "FAILED"},
+            "startedOn": "2024-05-01T08:00:00+02:00",
+            "finishedOn": "2024-05-01T08:01:00+02:00",
+            "testExecution": {"issueId": "10500"},
+            "comment": "checkout failed on staging",
+            "defects": ["10600"],
+            "evidence": [{"filename": "report.html", "downloadLink": "https://xray.example/report.html"}],
+            "steps": [{
+                "status": {"name": "FAILED"},
+                "actualResult": "HTTP 500",
+                "comment": null,
+                "evidence": []
+            }],
+            "results": [{
+                "name": "checkout succeeds",
+                "status": {"name": "FAILED"},
+                "log": "AssertionError: expected 200, got 500",
+                "duration": 1520.5
+            }]
+        },
+        {
+            "id": "run-2",
+            "status": {"name": "PASSED"},
+            "startedOn": null,
+            "finishedOn": null,
+            "testExecution": null,
+            "comment": null,
+            "defects": null,
+            "evidence": null,
+            "steps": [null],
+            "results": null
+        },
+        null
+    ]))
+}
+
+#[test]
+fn details_print_comment_defects_evidence_steps_and_results() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let _auth = mock_auth(&server);
+    let graphql = mock_graphql_with_details(&server, detailed_page());
+
+    let output = run_args(
+        &server,
+        &["xray", "test-runs", "TEST-123", "--json", "--details"],
+        &[],
+    );
+
+    graphql.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        value["runs"],
+        serde_json::json!([
+            {
+                "id": "run-1",
+                "status": "FAILED",
+                "startedOn": "2024-05-01T08:00:00+02:00",
+                "finishedOn": "2024-05-01T08:01:00+02:00",
+                "testExecutionIssueId": "10500",
+                "comment": "checkout failed on staging",
+                "defects": ["10600"],
+                "evidence": [{"filename": "report.html", "downloadLink": "https://xray.example/report.html"}],
+                "steps": [{
+                    "status": "FAILED",
+                    "actualResult": "HTTP 500",
+                    "comment": null,
+                    "evidence": []
+                }],
+                "results": [{
+                    "name": "checkout succeeds",
+                    "status": "FAILED",
+                    "log": "AssertionError: expected 200, got 500",
+                    "duration": 1520.5
+                }]
+            },
+            {
+                "id": "run-2",
+                "status": "PASSED",
+                "startedOn": null,
+                "finishedOn": null,
+                "testExecutionIssueId": null,
+                "comment": null,
+                "defects": null,
+                "evidence": null,
+                "steps": [null],
+                "results": null
+            },
+            null
+        ])
+    );
+    assert_eq!(value["returned"], 3);
+}
+
+#[test]
+fn details_work_for_a_test_execution_key() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue_with_fields(
+        &server,
+        serde_json::json!({"issuetype": {"name": "Test Execution"}}),
+    );
+    let _auth = mock_auth(&server);
+    let graphql = server.mock(|when, then| {
+        let mut when = when
+            .method(POST)
+            .path("/api/v2/graphql")
+            .body_includes("getTestRuns(testExecIssueIds: $testExecIssueIds, statuses: $statuses")
+            .body_excludes("testIssueIds");
+        for field in DETAIL_FIELDS {
+            when = when.body_includes(*field);
+        }
+        then.status(200).json_body(detailed_page());
+    });
+
+    let output = run_args(
+        &server,
+        &["xray", "test-runs", "TEST-123", "--json", "--details"],
+        &[],
+    );
+
+    graphql.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    let value: Value = serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(value["issueKind"], "testExecution");
+    assert_eq!(
+        value["runs"][0]["results"][0]["log"],
+        "AssertionError: expected 200, got 500"
+    );
+}
+
+#[test]
+fn without_details_the_request_and_output_have_no_detail_fields() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let _auth = mock_auth(&server);
+    let graphql = server.mock(|when, then| {
+        let mut when = when
+            .method(POST)
+            .path("/api/v2/graphql")
+            .body_includes("getTestRuns(testIssueIds: $testIssueIds, statuses: $statuses")
+            .body_excludes("steps");
+        for field in DETAIL_FIELDS {
+            when = when.body_excludes(*field);
+        }
+        // Xray would not send these fields; jcli must not print them even if it did.
+        then.status(200).json_body(detailed_page());
+    });
+
+    let output = run(&server, &[]);
+
+    graphql.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    let value: Value = serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(
+        value["runs"][0],
+        serde_json::json!({
+            "id": "run-1",
+            "status": "FAILED",
+            "startedOn": "2024-05-01T08:00:00+02:00",
+            "finishedOn": "2024-05-01T08:01:00+02:00",
+            "testExecutionIssueId": "10500"
+        })
+    );
+}
