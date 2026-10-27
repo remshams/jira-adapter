@@ -380,12 +380,6 @@ struct ErrorCollection {
     errors: Option<BTreeMap<String, String>>,
 }
 
-/// Maps a 400 from the search endpoint. Jira explains a rejected JQL query
-/// in the error body; its messages are joined into one terminal-safe line
-/// so an agent can fix the query. Occurrences of `credentials` in field
-/// names and messages become `[REDACTED]`. A body that is too large,
-/// unreadable, not an error collection, or without messages falls back to
-/// the generic status error.
 /// Whether paging ends after `page`: Jira marked it the last one, gave no
 /// token for the next one, or sent no issues on it.
 fn is_final_page(page: &SearchPage) -> bool {
@@ -394,6 +388,12 @@ fn is_final_page(page: &SearchPage) -> bool {
         || page.issues.as_ref().is_none_or(Vec::is_empty)
 }
 
+/// Maps a 400 from the search endpoint. Jira explains a rejected JQL query
+/// in the error body; its messages are joined into one terminal-safe line
+/// so an agent can fix the query. Occurrences of `credentials` in field
+/// names and messages become `[REDACTED]`. A body that is too large,
+/// unreadable, not an error collection, or without messages falls back to
+/// the generic status error.
 fn invalid_query_error(response: Response, credentials: &[String]) -> JiraClientError {
     query_error_messages(response, credentials).map_or(
         JiraClientError::Api { status: 400 },
