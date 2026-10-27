@@ -219,7 +219,9 @@ impl XrayClient {
         let mut runs = Vec::new();
         let mut total = None;
         // Every page before the final one adds at least one run, so `limit`
-        // pages are always enough; the bound only keeps the loop finite.
+        // pages are always enough. The bound keeps the loop finite even when
+        // the stop rule is broken, so such a mutant fails a test instead of
+        // hanging it on a mock that keeps answering the same request.
         for _ in 0..limit {
             let start = runs.len();
             body["variables"]["start"] = json!(start);
