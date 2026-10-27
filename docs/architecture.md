@@ -270,8 +270,8 @@ It sends two requests per `xray test-runs` call, and neither changes Xray data:
 2. `POST api/v2/graphql` with the bearer token and the `getTestRuns` query for the
    numeric issue ID. A Test sends the ID as `testIssueIds`, a Test Execution or
    Sub Test Execution as `testExecIssueIds`; each kind has its own query text.
-   `limit` is 100 and `start` is 0. `--status` values travel as a GraphQL variable, never as query
-   text. The response is read up to 16 MiB.
+   `limit` is 100 and `start` is 0. `--status` values travel as a GraphQL
+   variable, never as query text. The response is read up to 16 MiB.
 
 The Xray client follows no redirects, because both requests carry credentials. It
 uses the same 10 second connect and 30 second request timeouts. Status codes map
