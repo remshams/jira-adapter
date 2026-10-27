@@ -1329,9 +1329,12 @@ mod tests {
             when.method(GET)
                 .path("/rest/api/3/search/jql")
                 .query_param("jql", "")
-                .query_param("maxResults", "100");
-            then.status(200)
-                .json_body(serde_json::json!({"issues": [], "isLast": true}));
+                .query_param("maxResults", "100")
+                .query_param_count(r".*", r".*", 3);
+            // The token is never followed: isLast ends paging first.
+            then.status(200).json_body(
+                serde_json::json!({"issues": [], "isLast": true, "nextPageToken": "unused"}),
+            );
         });
 
         let results = client(&server).search_issues("", 100).unwrap();
@@ -1473,9 +1476,10 @@ mod tests {
 
     #[test]
     fn missing_or_null_issue_lists_are_empty_results() {
+        // The token is never followed: isLast ends paging first.
         for body in [
-            serde_json::json!({"isLast": true}),
-            serde_json::json!({"issues": null, "isLast": true}),
+            serde_json::json!({"isLast": true, "nextPageToken": "unused"}),
+            serde_json::json!({"issues": null, "isLast": true, "nextPageToken": "unused"}),
         ] {
             let server = MockServer::start();
             let mock = search_page_mock(&server, 25, None, 200, body);
