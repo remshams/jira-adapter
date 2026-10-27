@@ -14,7 +14,7 @@ use url::Url;
 use crate::config::Config;
 use crate::issue_key::IssueKey;
 use crate::jira::attachment::{Attachment, AttachmentIssue, MAX_ATTACHMENT_ID_BYTES};
-use crate::jira::issue::{Account, Issue};
+use crate::jira::issue::{Account, Issue, IssueReference, IssueType};
 use crate::jira::search::SearchPage;
 use crate::output::terminal_field;
 
@@ -155,15 +155,22 @@ impl JiraClient {
         self.get_bounded_metadata_json_url(url, "issue")
     }
 
-    /// Returns only the numeric issue ID (for example `"10400"`), which
-    /// Xray's GraphQL API uses to reference an issue. The request asks for
-    /// the harmless `summary` field only, and deserialization keeps just
-    /// the top-level `id`.
-    pub fn issue_id(&self, issue_key: &IssueKey) -> Result<String, JiraClientError> {
+    /// Returns the numeric issue ID (for example `"10400"`) and the issue
+    /// type name in one request. The request asks for the `issuetype` field
+    /// only, and deserialization keeps just the top-level `id` and the type
+    /// name.
+    pub fn issue_reference(&self, issue_key: &IssueKey) -> Result<IssueReference, JiraClientError> {
         let mut url = self.endpoint_url(&["rest", "api", "3", "issue", issue_key.as_str()])?;
-        url.query_pairs_mut().append_pair("fields", "summary");
+        url.query_pairs_mut().append_pair("fields", "issuetype");
         let issue: MinimalIssue = self.get_bounded_metadata_json_url(url, "issue")?;
-        Ok(issue.id)
+        let issue_type = issue
+            .fields
+            .and_then(|fields| fields.issue_type)
+            .and_then(|issue_type| issue_type.name);
+        Ok(IssueReference {
+            id: issue.id,
+            issue_type,
+        })
     }
 
     /// Runs a JQL search and returns only the first page of at most `limit`
@@ -315,10 +322,18 @@ fn status_error(
     }
 }
 
-/// Minimal issue projection for lookups that only need the numeric issue ID.
+/// Minimal issue projection for lookups that need the numeric issue ID and
+/// the issue type. Jira may omit `fields` or send a null `issuetype`.
 #[derive(serde::Deserialize)]
 struct MinimalIssue {
     id: String,
+    fields: Option<MinimalIssueFields>,
+}
+
+#[derive(serde::Deserialize)]
+struct MinimalIssueFields {
+    #[serde(rename = "issuetype")]
+    issue_type: Option<IssueType>,
 }
 
 /// Jira's error body: general messages plus messages keyed by field.
@@ -542,32 +557,68 @@ mod tests {
         );
     }
 
-    #[test]
-    fn issue_id_requests_only_the_summary_field_and_reads_only_the_top_level_id() {
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
+    fn issue_reference_mock(server: &MockServer, body: serde_json::Value) -> httpmock::Mock<'_> {
+        server.mock(|when, then| {
             when.method(GET)
                 .path("/rest/api/3/issue/ABC-123")
-                .query_param("fields", "summary")
+                .query_param("fields", "issuetype")
                 .query_param_count(r".*", r".*", 1)
                 .header("Authorization", AUTH_HEADER);
-            then.status(200).json_body(serde_json::json!({
+            then.status(200).json_body(body);
+        })
+    }
+
+    fn issue_reference(server: &MockServer) -> IssueReference {
+        client(server)
+            .issue_reference(&"ABC-123".parse().unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn issue_reference_requests_only_the_issuetype_field_and_reads_id_and_type_name() {
+        let server = MockServer::start();
+        let mock = issue_reference_mock(
+            &server,
+            serde_json::json!({
                 "id": "10400",
                 "key": "ABC-123",
                 "fields": {
-                    "summary": "Whatever",
-                    "status": {"name": "In Progress"},
-                    "description": {"type": "doc", "content": []}
+                    "issuetype": {"id": "10010", "name": "Test Execution", "subtask": false},
+                    "summary": "Whatever"
                 }
-            }));
-        });
+            }),
+        );
 
-        let issue_id = client(&server)
-            .issue_id(&"ABC-123".parse().unwrap())
-            .unwrap();
+        let reference = issue_reference(&server);
 
         mock.assert_calls(1);
-        assert_eq!(issue_id, "10400");
+        assert_eq!(
+            reference,
+            IssueReference {
+                id: "10400".to_owned(),
+                issue_type: Some("Test Execution".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn issue_reference_keeps_a_missing_issue_type_name_as_none() {
+        for body in [
+            serde_json::json!({"id": "10400"}),
+            serde_json::json!({"id": "10400", "fields": null}),
+            serde_json::json!({"id": "10400", "fields": {}}),
+            serde_json::json!({"id": "10400", "fields": {"issuetype": null}}),
+            serde_json::json!({"id": "10400", "fields": {"issuetype": {"name": null}}}),
+        ] {
+            let server = MockServer::start();
+            let mock = issue_reference_mock(&server, body.clone());
+
+            let reference = issue_reference(&server);
+
+            mock.assert_calls(1);
+            assert_eq!(reference.id, "10400", "{body}");
+            assert_eq!(reference.issue_type, None, "{body}");
+        }
     }
 
     #[test]
