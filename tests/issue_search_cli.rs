@@ -448,7 +448,7 @@ fn follows_the_page_token_until_the_limit_and_keeps_jira_order() {
 }
 
 #[test]
-fn the_last_page_before_the_limit_is_not_truncated() {
+fn is_last_on_the_page_that_reaches_the_limit_is_not_truncated() {
     let server = MockServer::start();
     let first = first_of_two_pages(&server);
     let second = next_page_mock(
