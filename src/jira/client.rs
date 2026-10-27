@@ -178,8 +178,9 @@ impl JiraClient {
     /// Runs a JQL search and returns at most `limit` issues in Jira's order.
     /// Each request asks for up to 100 issues and passes the previous page's
     /// `nextPageToken`. Paging stops once `limit` issues are collected, when
-    /// a page is the last one, or when a page has no token. The query is
-    /// passed to Jira unchanged; a failed page fails the whole search.
+    /// a page is the last one, has no token, or adds no issues; the last
+    /// rule ends a server that keeps handing out tokens for empty pages. The
+    /// query is passed to Jira unchanged; a failed page fails the whole search.
     pub fn search_issues(&self, jql: &str, limit: u32) -> Result<SearchResults, JiraClientError> {
         let limit = limit as usize;
         let mut issues = Vec::new();
@@ -187,9 +188,12 @@ impl JiraClient {
         loop {
             let max_results = (limit - issues.len()).min(SEARCH_PAGE_SIZE);
             let page = self.search_page(jql, max_results, token.as_deref())?;
-            issues.extend(page.issues.unwrap_or_default());
+            let page_issues = page.issues.unwrap_or_default();
+            let empty_page = page_issues.is_empty();
+            issues.extend(page_issues);
             token = page.next_page_token;
-            if issues.len() >= limit || page.is_last == Some(true) || token.is_none() {
+            if issues.len() >= limit || page.is_last == Some(true) || token.is_none() || empty_page
+            {
                 return Ok(SearchResults {
                     issues,
                     is_last: page.is_last,
@@ -1407,6 +1411,32 @@ mod tests {
             assert_eq!(results.issues.len(), 100);
             assert_eq!(results.is_last, is_last);
         }
+    }
+
+    #[test]
+    fn search_stops_when_a_page_adds_no_issues() {
+        let server = MockServer::start();
+        let first = search_page_mock(
+            &server,
+            100,
+            None,
+            200,
+            serde_json::json!({"issues": search_hits(1, 100), "nextPageToken": "t1", "isLast": false}),
+        );
+        let second = search_page_mock(
+            &server,
+            100,
+            Some("t1"),
+            200,
+            serde_json::json!({"issues": [], "nextPageToken": "t2", "isLast": false}),
+        );
+
+        let results = search_with_limit(&server, 250).unwrap();
+
+        first.assert_calls(1);
+        second.assert_calls(1);
+        assert_eq!(results.issues.len(), 100);
+        assert_eq!(results.is_last, Some(false));
     }
 
     #[test]
