@@ -10,6 +10,9 @@ Proposed
 
 ## Context
 
+This record covers the links in `issue read`. The comments decision is added to
+it with #20 before it is accepted.
+
 `jcli issue read` printed the metadata and the description of an issue, but
 none of its links. An agent couldn't see which issues block a ticket or which
 pull requests are already linked to it, so it linked pull requests by hand in
