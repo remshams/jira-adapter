@@ -76,8 +76,10 @@ pub struct GetTestRunsData {
     pub get_test_runs: Option<TestRunPage>,
 }
 
-/// The fixed first page of `getTestRuns`: limit 100, start 0. Xray makes no
-/// ordering guarantee for the returned runs.
+/// A page of `getTestRuns`. The client merges the pages it fetched into one
+/// such page: the runs of all pages in fetch order, the last page's total,
+/// start 0 and the requested limit. Xray makes no ordering guarantee for
+/// the returned runs.
 ///
 /// Nullability follows the official GraphQL schema: `total`, `start`,
 /// `limit`, and `results` are nullable, and so is every entry inside
@@ -154,7 +156,7 @@ pub struct TestExecutionRef {
     pub issue_id: Option<String>,
 }
 
-/// Field that can order the returned page. Clap renders variant names as
+/// Field that can order the returned runs. Clap renders variant names as
 /// kebab-case values, so this is `--sort started-on`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum TestRunSortField {
@@ -170,10 +172,10 @@ pub enum TestRunSortDirection {
     Desc,
 }
 
-/// Sorts the returned page in place by the requested field. Xray makes no
-/// ordering promise for the page, so this only reorders what the server
-/// already returned; it can never surface runs outside the fixed first
-/// page. Valid `startedOn` timestamps sort first, ordered by instant
+/// Sorts the returned runs in place by the requested field. Xray makes no
+/// ordering promise for its pages, so this only reorders what the server
+/// already returned, across all fetched pages; it can never surface runs
+/// beyond the requested limit. Valid `startedOn` timestamps sort first, ordered by instant
 /// (oldest first for asc, newest first for desc), then runs with a missing
 /// or unparseable timestamp, then null entries. Equal instants break ties
 /// by run ID (null IDs last) and finally by original position, so the
@@ -380,7 +382,7 @@ impl TestRunDetailsOutput {
 }
 
 impl TestRunsOutput {
-    /// Builds the CLI output from one page. `returned` counts every entry
+    /// Builds the CLI output from the merged page. `returned` counts every entry
     /// of a non-null results list, including null entries; a null results
     /// list counts as zero. `truncated` compares the reported total with
     /// that count and is null when no total is available. `details` adds
@@ -529,6 +531,53 @@ mod tests {
         );
         assert_eq!(empty_page.truncated, Some(false));
         assert_eq!(empty_page.returned, 0);
+    }
+
+    #[test]
+    fn a_merged_page_reports_the_requested_limit_and_truncation_over_all_runs() {
+        let runs = (0..250).map(|index| Some(run_with(&index.to_string())));
+        let mut page = page_with(Some(400), Some(runs.collect()));
+        page.limit = Some(250);
+
+        let output = summary("TEST-123", XrayIssueKind::Test, &page);
+
+        assert_eq!(output.returned, 250);
+        assert_eq!(output.runs.len(), 250);
+        assert_eq!(output.truncated, Some(true));
+        assert_eq!(output.start, Some(0));
+        assert_eq!(output.limit, Some(250));
+
+        page.total = Some(250);
+        let all_runs = summary("TEST-123", XrayIssueKind::Test, &page);
+        assert_eq!(all_runs.truncated, Some(false));
+    }
+
+    #[test]
+    fn sorting_orders_runs_from_all_merged_pages() {
+        // The newest run came on the last page, the oldest on the first.
+        let mut page = page_with(
+            Some(150),
+            Some(
+                (0..150)
+                    .map(|index| {
+                        let started_on =
+                            format!("2024-05-01T{:02}:{:02}:00Z", index / 60, index % 60);
+                        run_at(&format!("run-{index}"), Some(&started_on))
+                    })
+                    .collect(),
+            ),
+        );
+
+        sort_page(
+            &mut page,
+            TestRunSortField::StartedOn,
+            TestRunSortDirection::Desc,
+        );
+
+        let ids = sorted_ids(page.results.as_ref().unwrap());
+        assert_eq!(ids.len(), 150);
+        assert_eq!(ids[0], Some("run-149"));
+        assert_eq!(ids[149], Some("run-0"));
     }
 
     #[test]
