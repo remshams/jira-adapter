@@ -363,8 +363,8 @@
   flags and out-of-range values such as <code>--limit 0</code> before jcli reads any
   configuration, and exits with code 2.</p>
 
-  <p>Each function in <code>src/commands.rs</code> is the application service for one command. It
-  runs the same steps in order:</p>
+  <p>Each <code>pub(crate)</code> function in <code>src/commands.rs</code> is the application service for one
+  command. It runs the same steps in order:</p>
   <ol>
     <li>Parse the issue key, if the command takes one. A malformed key exits 1 before
     jcli loads configuration.</li>
@@ -375,7 +375,7 @@
     <li>Render the complete result and write it to stdout in one call, then exit 0.</li>
   </ol>
 
-  <p>Every function ends the process itself and returns <code>!</code>. A failure at any step
+  <p>Every application service ends the process itself and returns <code>!</code>. A failure at any step
   prints <code>error: &lt;message&gt;</code> on stderr and exits with the step's code. stdout stays
   empty on failure.</p>
 
@@ -563,14 +563,14 @@
     set, non-empty and absolute, otherwise <code>~/.config/jcli/config.toml</code> when <code>HOME</code>
     is absolute. There is no system-wide file. Unknown keys are an error.</li>
     <li>A value that is present in a higher source wins even when it is blank or, in the
-    environment, not valid Unicode. A <code>.env</code> or TOML file that is not valid UTF-8
-    fails as a whole. That setting then fails as <code>configuration value &lt;NAME&gt; is set but
-    empty</code>; it never falls through to a lower source. Only an absent value falls
+    environment, not valid Unicode. That setting then fails as <code>configuration value &lt;NAME&gt; is set
+    but empty</code>; it never falls through to a lower source. Only an absent value falls
     through, and a setting absent everywhere fails as <code>missing configuration value
     &lt;NAME&gt;</code>.</li>
     <li>Both files are read on every load, so an unreadable or malformed file fails the
-    command even when the environment supplies every setting. File errors are
-    generic and never show the file's contents.</li>
+    command even when the environment supplies every setting. A <code>.env</code> or TOML file
+    that is not valid UTF-8 fails as a whole. File errors are generic and never show
+    the file's contents.</li>
     <li>A base URL only has to parse as a URL. jcli appends a trailing slash so API
     paths join onto any path prefix, and drops the query and fragment when it
     builds request URLs.</li>
@@ -758,8 +758,9 @@
 
   <p>The CLI tests in <a href="../tests/"><code>tests/</code></a> are black-box tests. <a href="../tests/common/mod.rs"><code>tests/common/mod.rs</code></a> runs the
   built <code>jcli</code> binary with a cleared environment, in a fresh temporary directory or
-  one the test provides. Tests that reach Jira or Xray start their own <code>httpmock</code> server, and the tests
-  assert only on stdout, stderr, exit codes and written files.</p>
+  one the test provides. Tests that reach Jira or Xray start their own <code>httpmock</code>
+  server, and the tests assert only on stdout, stderr, exit codes and written
+  files.</p>
 
   <p>The gates (<a href="adr/0004-quality-gates.md">ADR 0004</a>):</p>
   <ul>

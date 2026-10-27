@@ -43,8 +43,8 @@ function in `src/commands.rs`. Clap rejects unknown commands, missing required
 flags and out-of-range values such as `--limit 0` before jcli reads any
 configuration, and exits with code 2.
 
-Each function in `src/commands.rs` is the application service for one command. It
-runs the same steps in order:
+Each `pub(crate)` function in `src/commands.rs` is the application service for one
+command. It runs the same steps in order:
 
 1. Parse the issue key, if the command takes one. A malformed key exits 1 before
    jcli loads configuration.
@@ -54,7 +54,7 @@ runs the same steps in order:
 3. Build the client and send the requests.
 4. Render the complete result and write it to stdout in one call, then exit 0.
 
-Every function ends the process itself and returns `!`. A failure at any step
+Every application service ends the process itself and returns `!`. A failure at any step
 prints `error: <message>` on stderr and exits with the step's code. stdout stays
 empty on failure.
 
@@ -173,14 +173,14 @@ current working directory, then the per-user `config.toml`
   set, non-empty and absolute, otherwise `~/.config/jcli/config.toml` when `HOME`
   is absolute. There is no system-wide file. Unknown keys are an error.
 - A value that is present in a higher source wins even when it is blank or, in the
-  environment, not valid Unicode. A `.env` or TOML file that is not valid UTF-8
-  fails as a whole. That setting then fails as `configuration value <NAME> is set but
-  empty`; it never falls through to a lower source. Only an absent value falls
+  environment, not valid Unicode. That setting then fails as `configuration value <NAME> is set
+  but empty`; it never falls through to a lower source. Only an absent value falls
   through, and a setting absent everywhere fails as `missing configuration value
   <NAME>`.
 - Both files are read on every load, so an unreadable or malformed file fails the
-  command even when the environment supplies every setting. File errors are
-  generic and never show the file's contents.
+  command even when the environment supplies every setting. A `.env` or TOML file
+  that is not valid UTF-8 fails as a whole. File errors are generic and never show
+  the file's contents.
 - A base URL only has to parse as a URL. jcli appends a trailing slash so API
   paths join onto any path prefix, and drops the query and fragment when it
   builds request URLs.
@@ -358,8 +358,9 @@ bodies, or that keep sending data past the request timeout.
 
 The CLI tests in `tests/` are black-box tests. `tests/common/mod.rs` runs the
 built `jcli` binary with a cleared environment, in a fresh temporary directory or
-one the test provides. Tests that reach Jira or Xray start their own `httpmock` server, and the tests
-assert only on stdout, stderr, exit codes and written files.
+one the test provides. Tests that reach Jira or Xray start their own `httpmock`
+server, and the tests assert only on stdout, stderr, exit codes and written
+files.
 
 The gates ([ADR 0004](adr/0004-quality-gates.md)):
 
