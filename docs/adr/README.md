@@ -42,3 +42,4 @@ was first built; their Date is the date they were recorded.
 | [0007](0007-output-for-agents.md) | Output for agents | Accepted |
 | [0008](0008-hand-rolled-adf-to-markdown-renderer.md) | Hand-rolled ADF-to-Markdown renderer | Accepted |
 | [0009](0009-attachment-downloads.md) | Stream attachments into verified, atomically replaced files | Accepted |
+| [0010](0010-list-and-select-attachments.md) | List attachments and select which ones to download | Proposed |
