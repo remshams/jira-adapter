@@ -22,7 +22,7 @@ pub struct RemoteLink {
 
 /// Jira's `issuelinks` entry. A link holds either `outwardIssue` or
 /// `inwardIssue`; the link type names the relation for each direction.
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JiraIssueLink {
     #[serde(rename = "type")]
@@ -57,9 +57,11 @@ struct JiraNamed {
 impl From<JiraIssueLink> for IssueLink {
     fn from(link: JiraIssueLink) -> Self {
         let link_type = link.link_type.unwrap_or_default();
-        let (relation, issue) = match link.outward_issue {
-            Some(issue) => (link_type.outward, issue),
-            None => (link_type.inward, link.inward_issue.unwrap_or_default()),
+        // Without either issue the direction is unknown, so is the relation.
+        let (relation, issue) = match (link.outward_issue, link.inward_issue) {
+            (Some(issue), _) => (link_type.outward, issue),
+            (None, Some(issue)) => (link_type.inward, issue),
+            (None, None) => (None, JiraLinkedIssue::default()),
         };
         let fields = issue.fields.unwrap_or_default();
         Self {
@@ -166,10 +168,10 @@ mod tests {
     }
 
     #[test]
-    fn a_link_without_an_issue_still_takes_the_inward_relation() {
+    fn a_link_without_an_issue_has_no_relation() {
         let parsed = issue_link(json!({"type": link_type()}));
 
-        assert_eq!(parsed.relation.as_deref(), Some("is blocked by"));
+        assert_eq!(parsed.relation, None);
         assert_eq!(parsed.key, None);
     }
 
