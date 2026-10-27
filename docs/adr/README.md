@@ -45,4 +45,4 @@ was first built; their Date is the date they were recorded.
 | [0010](0010-list-and-select-attachments.md) | List attachments and select which ones to download | Accepted |
 | [0011](0011-xray-issue-kinds.md) | Xray issue kinds and paging for test runs | Accepted |
 | [0012](0012-search-paging.md) | Page issue search up to 1000 issues | Accepted |
-| [0013](0013-issue-read-links-and-comments.md) | Issue links and comments in issue read | Proposed |
+| [0013](0013-issue-read-links-and-comments.md) | Issue links and comments in issue read | Accepted |
