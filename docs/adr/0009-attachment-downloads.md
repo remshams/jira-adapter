@@ -21,7 +21,7 @@ earlier downloads.
 `./<KEY>/`, or directly into the directory given with `--out`. It runs on Unix
 only.
 
-- Plan every download before the first request. Reject unsafe or duplicate IDs,
+- Plan every download before the first download. Reject unsafe or duplicate IDs,
   negative sizes, files over 20 GiB, more than 1,000 attachments, more than
   100 GiB in total and file names that collide case-insensitively.
 - Name each file `<id>-<sanitized filename>`, at most 240 bytes, so names never

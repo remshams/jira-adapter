@@ -33,8 +33,9 @@ Read each setting from three sources, in this order:
    system-wide file.
 
 Precedence applies per setting. A value present in a higher source is
-authoritative even when it is blank or not valid Unicode: it fails as empty
-instead of falling through. Only an absent value falls through. Errors name the
+authoritative even when it is blank or, in the environment, not valid Unicode: it
+fails as empty instead of falling through. A `.env` or TOML file that is not valid
+UTF-8 fails as a whole. Only an absent value falls through. Errors name the
 setting, never its value. Jira-only commands do not load the Xray settings.
 
 A base URL only has to parse as a URL; jcli adds a trailing slash so API paths
