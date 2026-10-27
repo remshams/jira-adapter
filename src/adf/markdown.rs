@@ -1,17 +1,23 @@
 use serde_json::Value;
 
+use crate::jira::comment::{Comment, Comments};
 use crate::jira::issue::{Account, AdfDocument, AdfMark, AdfNode, Issue};
 use crate::jira::link::{IssueLink, RemoteLink};
 
 /// Renders a complete Jira issue as stable Markdown, including its final
 /// newline. The sections follow each other in a fixed order, separated by one
-/// blank line.
-pub fn render_issue(issue: &Issue, remote_links: &[RemoteLink]) -> String {
-    let sections = [
+/// blank line. The comments section is added only when `comments` is given.
+pub fn render_issue(
+    issue: &Issue,
+    remote_links: &[RemoteLink],
+    comments: Option<&Comments>,
+) -> String {
+    let mut sections = vec![
         render_overview(issue),
         render_description(issue),
         render_links(&issue.fields.issue_links, remote_links),
     ];
+    sections.extend(comments.map(render_comments));
     format!("{}\n", sections.join("\n\n"))
 }
 
@@ -54,15 +60,80 @@ fn render_overview(issue: &Issue) -> String {
 }
 
 fn render_description(issue: &Issue) -> String {
-    let description = issue
-        .fields
-        .description
-        .as_ref()
+    let description = render_body(issue.fields.description.as_ref(), "No description.");
+    format!("## Description\n\n{description}")
+}
+
+/// An ADF body without leading or trailing newlines, or `placeholder` when
+/// the body is missing or has no visible text.
+fn render_body(document: Option<&AdfDocument>, placeholder: &str) -> String {
+    document
         .filter(|document| has_meaningful_content(&document.content))
         .map(render_document)
         .filter(|rendered| !rendered.trim().is_empty())
-        .unwrap_or_else(|| "No description.".to_string());
-    format!("## Description\n\n{}", description.trim_matches('\n'))
+        .unwrap_or_else(|| placeholder.to_string())
+        .trim_matches('\n')
+        .to_string()
+}
+
+/// The comments oldest first, each under a `###` heading, or `None`. A last
+/// line says how many comments Jira reports when fewer were fetched.
+fn render_comments(comments: &Comments) -> String {
+    let mut blocks = comments
+        .comments
+        .iter()
+        .map(render_comment)
+        .collect::<Vec<_>>();
+    if blocks.is_empty() {
+        blocks.push("None".to_string());
+    }
+    blocks.extend(truncation_note(comments));
+    format!("## Comments\n\n{}", blocks.join("\n\n"))
+}
+
+/// `### <author> · <created>`, a blank line, then the body. Headings in the
+/// body move three levels down so they nest under the comment heading.
+fn render_comment(comment: &Comment) -> String {
+    let author = metadata_or_unknown(comment.author.as_deref());
+    let created = comment
+        .created
+        .as_deref()
+        .and_then(timestamp_metadata)
+        .unwrap_or_else(|| "Unknown".to_string());
+    let body = comment.body.clone().map(|mut body| {
+        shift_headings(&mut body.content);
+        body
+    });
+    let body = render_body(body.as_ref(), "No content.");
+    format!("### {author} · {created}\n\n{body}")
+}
+
+fn truncation_note(comments: &Comments) -> Option<String> {
+    let shown = comments.comments.len();
+    comments
+        .total
+        .filter(|&total| total > shown)
+        .map(|total| format!("Showing the first {shown} of {total} comments."))
+}
+
+/// Moves every heading with a valid level three levels down, to at most
+/// level 6. Headings with an invalid level keep it and render as plain text.
+fn shift_headings(nodes: &mut [AdfNode]) {
+    for node in nodes {
+        if node.node_type == "heading"
+            && let Some(attrs) = node.attrs.as_mut()
+        {
+            shift_heading_level(attrs);
+        }
+        shift_headings(&mut node.content);
+    }
+}
+
+fn shift_heading_level(attrs: &mut Value) {
+    if let Some(level) = integer_attr(Some(attrs), "level").filter(|level| (1..=6).contains(level))
+    {
+        attrs["level"] = Value::from((level + 3).min(6));
+    }
 }
 
 /// One list with the issue links, then the remote links, each in Jira's
@@ -1223,7 +1294,7 @@ mod tests {
     #[test]
     fn missing_and_effectively_empty_descriptions_use_the_fallback() {
         assert!(
-            render_issue(&issue(None), &[])
+            render_issue(&issue(None), &[], None)
                 .ends_with("## Description\n\nNo description.\n\n## Links\n\nNone\n")
         );
 
@@ -1246,7 +1317,7 @@ mod tests {
             }]}]),
         ];
         for content in empty_content {
-            let output = render_issue(&issue(Some(document(content))), &[]);
+            let output = render_issue(&issue(Some(document(content))), &[], None);
             assert!(output.ends_with("## Description\n\nNo description.\n\n## Links\n\nNone\n"));
         }
     }
@@ -1265,7 +1336,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let output = render_issue(&issue, &[]);
+        let output = render_issue(&issue, &[], None);
 
         assert!(output.contains(
             "- Type: Unknown\n- Status: Open\n- Assignee: Unknown\n- Reporter: Unknown\n- Created: Unknown\n- Labels: None\n- Attachments: 0\n"
@@ -1290,7 +1361,7 @@ mod tests {
         }))
         .unwrap();
 
-        let output = render_issue(&issue, &[]);
+        let output = render_issue(&issue, &[], None);
 
         assert!(output.contains("- Attachments: 1\n"));
         assert!(!output.contains("private-id"));
@@ -1311,7 +1382,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let output = render_issue(&issue, &[]);
+        let output = render_issue(&issue, &[], None);
 
         assert!(output.starts_with("# ABC-123 \\# forged: \\*summary\\*\\[31m\n"));
         assert!(output.contains("- Status: \\> Open\n"));
@@ -1334,7 +1405,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let output = render_issue(&issue, &[]);
+        let output = render_issue(&issue, &[], None);
 
         assert!(output.contains(
             "- Assignee: Unknown\n- Reporter: Unknown\n- Created: Unknown\n- Labels: kept\n- Attachments: 0\n"
@@ -1356,7 +1427,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(render_issue(&issue, &[]).contains("- Labels: None\n- Attachments: 0\n"));
+        assert!(render_issue(&issue, &[], None).contains("- Labels: None\n- Attachments: 0\n"));
     }
 
     #[test]
@@ -1366,7 +1437,7 @@ mod tests {
         );
 
         assert_eq!(
-            render_issue(&issue(Some(description)), &[]),
+            render_issue(&issue(Some(description)), &[], None),
             "# ABC-123: Fix the thing\n\n- Type: Bug\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Created: 2026-10-17T02:13:45.123+0200\n- Labels: backend, urgent\n- Attachments: 0\n\n## Description\n\nRendered description.\n\n## Links\n\nNone\n"
         );
     }
@@ -1385,8 +1456,8 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(render_issue(&issue, &[]).contains("- Type: Unknown\n"));
-        assert!(render_issue(&issue, &[]).contains("- Created: Unknown\n"));
+        assert!(render_issue(&issue, &[], None).contains("- Type: Unknown\n"));
+        assert!(render_issue(&issue, &[], None).contains("- Created: Unknown\n"));
     }
 
     #[test]
@@ -1402,7 +1473,7 @@ mod tests {
             }))
             .unwrap();
 
-            assert!(render_issue(&issue, &[]).contains("- Type: Unknown\n"));
+            assert!(render_issue(&issue, &[], None).contains("- Type: Unknown\n"));
         }
     }
 
@@ -1417,7 +1488,7 @@ mod tests {
             issue.fields.created = Some(created.to_string());
 
             assert!(
-                render_issue(&issue, &[]).contains(&format!("\n- Created: {created}\n")),
+                render_issue(&issue, &[], None).contains(&format!("\n- Created: {created}\n")),
                 "{created}"
             );
         }
@@ -1436,7 +1507,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let output = render_issue(&issue, &[]);
+        let output = render_issue(&issue, &[], None);
 
         assert!(output.contains("- Type: \\[Bug\\]\\(x\\) \\# forged\n"));
         assert!(output.contains("- Created: 2026-10-17 \\*today\\*\\[31m \\# forged\n"));
@@ -1455,7 +1526,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let output = render_issue(&issue, &[]);
+        let output = render_issue(&issue, &[], None);
 
         assert!(output.contains("ABC-123: Summary \\# forged"));
         assert!(output.contains("- Type: Bug details\n"));
@@ -1481,7 +1552,7 @@ mod tests {
     fn links_section(issue_links: Vec<IssueLink>, remote_links: &[RemoteLink]) -> String {
         let mut issue = issue(None);
         issue.fields.issue_links = issue_links;
-        let output = render_issue(&issue, remote_links);
+        let output = render_issue(&issue, remote_links, None);
         let start = output.find("## Links\n\n").unwrap();
         output[start..].to_string()
     }
@@ -1491,7 +1562,7 @@ mod tests {
         let mut issue = issue(None);
         issue.fields.issue_links = vec![issue_link("blocks", "ABC-2", "Other", "Done")];
 
-        assert!(render_issue(&issue, &[]).ends_with(
+        assert!(render_issue(&issue, &[], None).ends_with(
             "- Attachments: 0\n\n## Description\n\nNo description.\n\n## Links\n\n- blocks ABC-2: Other (Done)\n"
         ));
     }
@@ -1635,5 +1706,193 @@ mod tests {
             "## Links\n\n- \\[blocks\\]\\(x\\) \\# forged ABC-2: \\*sum\\* mary (\\> Done)\n- Remote: \\<b\\>PR\\</b\\>  - item <https://example.com/>\n"
         );
         assert!(!output.contains(['\u{1b}', '\u{202e}', '\u{2028}']));
+    }
+
+    fn paragraph(text: &str) -> Value {
+        json!([{"type": "paragraph", "content": [{"type": "text", "text": text}]}])
+    }
+
+    fn comment(author: Option<&str>, created: Option<&str>, body: Option<Value>) -> Comment {
+        Comment {
+            author: author.map(str::to_string),
+            created: created.map(str::to_string),
+            body: body.map(document),
+        }
+    }
+
+    fn comments_section(comments: Vec<Comment>, total: Option<usize>) -> String {
+        let output = render_issue(&issue(None), &[], Some(&Comments { comments, total }));
+        let start = output.find("## Comments\n\n").unwrap();
+        output[start..].to_string()
+    }
+
+    #[test]
+    fn comments_follow_the_links_as_the_last_section() {
+        let comments = Comments {
+            comments: vec![comment(
+                Some("Jane Doe"),
+                Some("2026-10-17T02:13:45.123+0200"),
+                Some(paragraph("Looks good.")),
+            )],
+            total: Some(1),
+        };
+
+        assert!(
+            render_issue(&issue(None), &[], Some(&comments)).ends_with(
+                "## Description\n\nNo description.\n\n## Links\n\nNone\n\n## Comments\n\n### Jane Doe · 2026-10-17T02:13:45.123+0200\n\nLooks good.\n"
+            )
+        );
+    }
+
+    #[test]
+    fn renders_comments_in_the_given_order() {
+        let output = comments_section(
+            vec![
+                comment(
+                    Some("Jane Doe"),
+                    Some("2026-10-17T02:13:45.123+0200"),
+                    Some(json!([
+                        {"type": "paragraph", "content": [{"type": "text", "text": "First", "marks": [{"type": "strong"}]}]},
+                        {"type": "bulletList", "content": [
+                            {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "item"}]}]}
+                        ]}
+                    ])),
+                ),
+                comment(
+                    Some("John Roe"),
+                    Some("2026-10-18T00:00:00.000Z"),
+                    Some(paragraph("Second")),
+                ),
+            ],
+            Some(2),
+        );
+
+        assert_eq!(
+            output,
+            "## Comments\n\n### Jane Doe · 2026-10-17T02:13:45.123+0200\n\n**First**\n\n- item\n\n### John Roe · 2026-10-18T00:00:00.000Z\n\nSecond\n"
+        );
+    }
+
+    #[test]
+    fn no_comments_render_none() {
+        assert_eq!(
+            comments_section(Vec::new(), Some(0)),
+            "## Comments\n\nNone\n"
+        );
+        assert_eq!(comments_section(Vec::new(), None), "## Comments\n\nNone\n");
+    }
+
+    #[test]
+    fn fewer_comments_than_jira_reports_end_with_a_truncation_line() {
+        let output = comments_section(
+            vec![comment(
+                Some("A"),
+                Some("2026-10-17T00:00:00Z"),
+                Some(paragraph("x")),
+            )],
+            Some(1500),
+        );
+
+        assert_eq!(
+            output,
+            "## Comments\n\n### A · 2026-10-17T00:00:00Z\n\nx\n\nShowing the first 1 of 1500 comments.\n"
+        );
+    }
+
+    #[test]
+    fn a_reached_or_missing_total_adds_no_truncation_line() {
+        for total in [Some(1), Some(0), None] {
+            let output = comments_section(
+                vec![comment(
+                    Some("A"),
+                    Some("2026-10-17T00:00:00Z"),
+                    Some(paragraph("x")),
+                )],
+                total,
+            );
+
+            assert_eq!(
+                output, "## Comments\n\n### A · 2026-10-17T00:00:00Z\n\nx\n",
+                "{total:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_and_empty_comment_parts_use_fallbacks() {
+        let output = comments_section(
+            vec![
+                comment(None, None, None),
+                comment(Some("\u{1b}\r\n"), Some(""), Some(paragraph(" \n\t"))),
+                comment(Some(" "), Some("\u{7}"), Some(json!([]))),
+            ],
+            Some(3),
+        );
+
+        assert_eq!(
+            output,
+            "## Comments\n\n### Unknown · Unknown\n\nNo content.\n\n### Unknown · Unknown\n\nNo content.\n\n### Unknown · Unknown\n\nNo content.\n"
+        );
+    }
+
+    #[test]
+    fn comment_authors_and_timestamps_are_single_line_and_escaped() {
+        let output = comments_section(
+            vec![comment(
+                Some("[Jane](x)\n# forged\u{202e}"),
+                Some("today *now*\u{2028}## Links"),
+                Some(paragraph("# not a heading")),
+            )],
+            Some(1),
+        );
+
+        assert_eq!(
+            output,
+            "## Comments\n\n### \\[Jane\\]\\(x\\) \\# forged · today \\*now\\* \\#\\# Links\n\n\\# not a heading\n"
+        );
+        assert!(!output.contains(['\u{202e}', '\u{2028}']));
+    }
+
+    #[test]
+    fn comment_headings_nest_below_the_comment_heading() {
+        let heading = |level: Value, text: &str| json!({"type": "heading", "attrs": {"level": level}, "content": [{"type": "text", "text": text}]});
+        let output = comments_section(
+            vec![comment(
+                Some("A"),
+                Some("2026-10-17T00:00:00Z"),
+                Some(json!([
+                    heading(json!(1), "One"),
+                    heading(json!(2), "Two"),
+                    heading(json!(3), "Three"),
+                    heading(json!(6), "Six"),
+                    heading(json!(0), "Zero"),
+                    heading(json!(7), "Seven"),
+                    heading(json!("2"), "Text"),
+                    {"type": "blockquote", "content": [heading(json!(1), "Quoted")]}
+                ])),
+            )],
+            Some(1),
+        );
+
+        assert_eq!(
+            output,
+            "## Comments\n\n### A · 2026-10-17T00:00:00Z\n\n#### One\n\n##### Two\n\n###### Three\n\n###### Six\n\nZero\n\nSeven\n\nText\n\n> #### Quoted\n"
+        );
+    }
+
+    #[test]
+    fn description_headings_keep_their_level() {
+        let description = document(json!([
+            {"type": "heading", "attrs": {"level": 1}, "content": [{"type": "text", "text": "Top"}]}
+        ]));
+        let comments = Comments {
+            comments: Vec::new(),
+            total: Some(0),
+        };
+
+        assert!(
+            render_issue(&issue(Some(description)), &[], Some(&comments))
+                .contains("## Description\n\n# Top\n\n## Links")
+        );
     }
 }
