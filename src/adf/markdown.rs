@@ -1780,7 +1780,7 @@ mod tests {
     }
 
     #[test]
-    fn fewer_comments_than_jira_reports_end_with_a_truncation_line() {
+    fn fewer_comments_than_jira_reports_start_with_a_truncation_line() {
         let output = comments_section(
             vec![comment(
                 Some("A"),
