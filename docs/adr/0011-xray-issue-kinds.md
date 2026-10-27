@@ -80,7 +80,8 @@ jcli had no way to fetch the next page. Xray reports `total` on every page.
 
 - `xray test-runs` takes `--limit`, which accepts 1 to 1000 and defaults to 100.
   With the default, the first request is the same as before, and the same runs
-  give the same output.
+  give the same output. One difference: if Xray returns fewer runs than both the
+  page size and `total`, jcli now asks for the rest instead of stopping.
 - Each request asks for `limit: min(100, remaining)` runs, where `remaining` is
   `--limit` minus the runs collected so far. `start` is the number of runs
   collected so far. The query text and the other variables (the issue filter,
