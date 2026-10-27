@@ -110,7 +110,9 @@ fn line_start_metadata(value: Option<&str>) -> String {
     if text.trim().is_empty() {
         "Unknown".to_string()
     } else {
-        protect_ordered_list_starts(&escape_markdown(text, true))
+        // The caller puts a space after the value, so check `1.` with it.
+        let protected = protect_ordered_list_starts(&format!("{} ", escape_markdown(text, true)));
+        protected.trim_end_matches(' ').to_string()
     }
 }
 
@@ -1519,14 +1521,14 @@ mod tests {
 
     #[test]
     fn a_relation_cannot_open_a_nested_block() {
-        let links = ["1. step", "- x", "---", "    code"]
+        let links = ["1. step", "1.", "- x", "---", "    code"]
             .into_iter()
             .map(|relation| issue_link(relation, "ABC-2", "Summary", "Open"))
             .collect();
 
         assert_eq!(
             links_section(links, &[]),
-            "## Links\n\n- 1\\. step ABC-2: Summary (Open)\n- \\- x ABC-2: Summary (Open)\n- \\-\\-\\- ABC-2: Summary (Open)\n- code ABC-2: Summary (Open)\n"
+            "## Links\n\n- 1\\. step ABC-2: Summary (Open)\n- 1\\. ABC-2: Summary (Open)\n- \\- x ABC-2: Summary (Open)\n- \\-\\-\\- ABC-2: Summary (Open)\n- code ABC-2: Summary (Open)\n"
         );
     }
 
