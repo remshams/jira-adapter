@@ -484,6 +484,8 @@ mod tests {
             id: id.to_string(),
             filename: filename.to_string(),
             size,
+            created: None,
+            mime_type: None,
         }
     }
 
