@@ -23,9 +23,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bearer tokens are short JWTs; anything beyond 64 KiB is not one.
 const MAX_AUTH_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_GRAPHQL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-/// Fixed first page. No pagination flags by design for now.
-const PAGE_LIMIT: i64 = 100;
-const PAGE_START: i64 = 0;
+/// The most runs jcli asks Xray for in one `getTestRuns` request.
+const PAGE_SIZE: usize = 100;
 
 /// Fields every query selects per run.
 const RUN_FIELDS: &str = "      id\
@@ -176,21 +175,70 @@ impl XrayClient {
         })
     }
 
-    /// Returns the first fixed page of test runs for a Test or Test
-    /// Execution issue's numeric ID; `kind` picks the matching filter.
-    /// Resolves its own bearer token; the token stays local to this call and
-    /// is dropped afterwards. `statuses` filters server-side when given and
-    /// is sent as a GraphQL variable, never as query text. `details`
-    /// selects the run's comment, defects, evidence, steps and results.
+    /// Returns up to `limit` test runs for a Test or Test Execution issue's
+    /// numeric ID; `kind` picks the matching filter. Resolves its own bearer
+    /// token; the token stays local to this call and is dropped afterwards.
+    /// `statuses` filters server-side when given and is sent as a GraphQL
+    /// variable, never as query text. `details` selects the run's comment,
+    /// defects, evidence, steps and results.
+    ///
+    /// Requests pages of at most 100 runs. Every page sends the same query
+    /// and variables except `start` and `limit`. The runs of all pages are
+    /// merged into one page: `total` is the last page's total, `start` is 0
+    /// and `limit` is the requested limit. A failed page fails the call.
     pub fn test_runs(
         &self,
         kind: XrayIssueKind,
         issue_id: &str,
         statuses: Option<&[String]>,
         details: bool,
+        limit: usize,
     ) -> Result<TestRunPage, XrayClientError> {
         let token = self.authenticate()?;
-        self.get_test_runs(kind, issue_id, statuses, details, &token)
+        let filter = issue_ids_filter(kind);
+        // Absent statuses become JSON null so the variable is always set;
+        // values never reach the query text itself.
+        let body = json!({
+            "query": get_test_runs_query(filter, details),
+            "variables": {
+                filter: [issue_id],
+                "statuses": statuses,
+            },
+        });
+        self.collect_pages(body, &token, limit)
+    }
+
+    /// Requests pages of `body`'s query with increasing `start` until a stop
+    /// rule holds, and merges their runs into one page.
+    fn collect_pages(
+        &self,
+        mut body: serde_json::Value,
+        token: &str,
+        limit: usize,
+    ) -> Result<TestRunPage, XrayClientError> {
+        let mut runs = Vec::new();
+        let mut total = None;
+        // Every page before the final one adds at least one run, so `limit`
+        // pages are always enough; the bound only keeps the loop finite.
+        for _ in 0..limit {
+            let start = runs.len();
+            body["variables"]["start"] = json!(start);
+            body["variables"]["limit"] = json!((limit - start).min(PAGE_SIZE));
+            let page = self.get_test_runs(&body, token)?;
+            let page_runs = page.results.unwrap_or_default();
+            let last = is_final_page(page.total, start, page_runs.len());
+            total = page.total;
+            runs.extend(page_runs);
+            if last || runs.len() >= limit {
+                break;
+            }
+        }
+        Ok(TestRunPage {
+            total,
+            start: Some(0),
+            limit: Some(limit as i64),
+            results: Some(runs),
+        })
     }
 
     /// Exchanges the API key credentials for a bearer token. Xray answers
@@ -207,29 +255,14 @@ impl XrayClient {
         serde_json::from_slice(&body).map_err(|_| XrayClientError::InvalidAuthResponse)
     }
 
+    /// Sends one `getTestRuns` request and parses its page.
     fn get_test_runs(
         &self,
-        kind: XrayIssueKind,
-        issue_id: &str,
-        statuses: Option<&[String]>,
-        details: bool,
+        body: &serde_json::Value,
         token: &str,
     ) -> Result<TestRunPage, XrayClientError> {
         let url = self.endpoint_url(GRAPHQL_SEGMENTS)?;
-        let issue_ids_variable = issue_ids_filter(kind);
-        let query = get_test_runs_query(issue_ids_variable, details);
-        // Absent statuses become JSON null so the variable is always set;
-        // values never reach the query text itself.
-        let body = json!({
-            "query": query,
-            "variables": {
-                issue_ids_variable: [issue_id],
-                "statuses": statuses,
-                "limit": PAGE_LIMIT,
-                "start": PAGE_START,
-            },
-        });
-        let response = self.http.post(url).bearer_auth(token).json(&body).send()?;
+        let response = self.http.post(url).bearer_auth(token).json(body).send()?;
         let response = check_status(response)?;
         let body = read_bounded_body(response, MAX_GRAPHQL_RESPONSE_BYTES)?;
         parse_test_runs(&body)
@@ -269,6 +302,13 @@ impl From<reqwest::Error> for XrayClientError {
     fn from(source: reqwest::Error) -> Self {
         http_error(source)
     }
+}
+
+/// Paging stops after a page without runs, after a page without a total,
+/// and after the page that reaches Xray's total. The empty-page rule keeps
+/// a server that reports too high a total from keeping jcli in the loop.
+fn is_final_page(total: Option<i64>, start: usize, returned: usize) -> bool {
+    returned == 0 || total.is_none_or(|total| (start + returned) as i64 >= total)
 }
 
 fn parse_test_runs(body: &[u8]) -> Result<TestRunPage, XrayClientError> {
@@ -556,7 +596,7 @@ mod tests {
         let graphql = graphql_mock_with_statuses(&server, page_body(0, 0), None);
 
         client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap();
 
         graphql.assert_calls(1);
@@ -574,6 +614,7 @@ mod tests {
                 "10400",
                 Some(&["PASSED".to_owned()]),
                 false,
+                100,
             )
             .unwrap();
 
@@ -600,6 +641,7 @@ mod tests {
                     "IN_PROGRESS".to_owned(),
                 ]),
                 false,
+                100,
             )
             .unwrap();
 
@@ -626,7 +668,7 @@ mod tests {
         });
 
         client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap();
 
         graphql.assert_calls(1);
@@ -658,6 +700,7 @@ mod tests {
                 "10500",
                 Some(&["FAILED".to_owned()]),
                 false,
+                100,
             )
             .unwrap();
 
@@ -710,7 +753,7 @@ mod tests {
             let graphql = exact_query_mock(&server, query, filter, page_body(0, 0));
 
             client(&server)
-                .test_runs(kind, "10400", None, true)
+                .test_runs(kind, "10400", None, true, 100)
                 .unwrap();
 
             graphql.assert_calls(1);
@@ -736,7 +779,7 @@ mod tests {
             let graphql = exact_query_mock(&server, query, filter, page_body(0, 0));
 
             client(&server)
-                .test_runs(kind, "10400", None, false)
+                .test_runs(kind, "10400", None, false, 100)
                 .unwrap();
 
             graphql.assert_calls(1);
@@ -775,7 +818,7 @@ mod tests {
         );
 
         let page = client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, true)
+            .test_runs(XrayIssueKind::Test, "10400", None, true, 100)
             .unwrap();
 
         let run = page.results.as_ref().unwrap()[0].as_ref().unwrap();
@@ -824,7 +867,7 @@ mod tests {
         let auth = auth_mock(&server);
         let graphql = graphql_mock(&server, page_body(1, 1));
 
-        let page = match client(&server).test_runs(XrayIssueKind::Test, "10400", None, false) {
+        let page = match client(&server).test_runs(XrayIssueKind::Test, "10400", None, false, 100) {
             Ok(page) => page,
             Err(error) => {
                 eprintln!("error: {error:?}");
@@ -849,22 +892,272 @@ mod tests {
     }
 
     #[test]
-    fn pagination_is_fixed_and_makes_exactly_one_request() {
+    fn an_empty_first_page_makes_exactly_one_request() {
         let server = MockServer::start();
         let auth = auth_mock(&server);
         let graphql = graphql_mock(&server, page_body(0, 0));
 
-        let page = match client(&server).test_runs(XrayIssueKind::Test, "10400", None, false) {
-            Ok(page) => page,
-            Err(error) => {
-                eprintln!("error: {error:?}");
-                panic!("failed");
-            }
-        };
+        let page = client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
+            .unwrap();
 
         auth.assert_calls(1);
         graphql.assert_calls(1);
         assert!(page.results.as_ref().unwrap().is_empty());
+    }
+
+    /// Runs `run-<first>` to `run-<first + count - 1>` as one page with the
+    /// given total.
+    fn runs_page(total: Option<i64>, first: usize, count: usize) -> serde_json::Value {
+        serde_json::json!({"data": {"getTestRuns": {
+            "total": total,
+            "start": first,
+            "limit": 100,
+            "results": (first..first + count)
+                .map(|number| serde_json::json!({"id": format!("run-{number}")}))
+                .collect::<Vec<_>>()
+        }}})
+    }
+
+    /// The exact request body of the default Test query for one page.
+    fn test_page_request(start: usize, limit: usize) -> serde_json::Value {
+        serde_json::json!({
+            "query": DOCUMENTED_GET_TEST_RUNS_FOR_TEST_QUERY,
+            "variables": {
+                "testIssueIds": ["10400"],
+                "statuses": null,
+                "limit": limit,
+                "start": start,
+            },
+        })
+    }
+
+    /// Mocks one page. The body must match exactly, so a request for a page
+    /// the test did not plan finds no mock and fails with a 404 instead of
+    /// paging on.
+    fn page_mock(
+        server: &MockServer,
+        request: serde_json::Value,
+        status: u16,
+        then_body: serde_json::Value,
+    ) -> httpmock::Mock<'_> {
+        server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v2/graphql")
+                .header("Authorization", format!("Bearer {TOKEN}"))
+                .json_body(request);
+            then.status(status).json_body(then_body);
+        })
+    }
+
+    fn run_ids(page: &TestRunPage) -> Vec<String> {
+        page.results
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|run| run.as_ref().unwrap().id.clone().unwrap())
+            .collect()
+    }
+
+    fn expected_run_ids(count: usize) -> Vec<String> {
+        (0..count).map(|number| format!("run-{number}")).collect()
+    }
+
+    fn test_runs_with_limit(
+        server: &MockServer,
+        limit: usize,
+    ) -> Result<TestRunPage, XrayClientError> {
+        client(server).test_runs(XrayIssueKind::Test, "10400", None, false, limit)
+    }
+
+    #[test]
+    fn paging_collects_the_limit_and_asks_only_for_the_remainder() {
+        let server = MockServer::start();
+        let auth = auth_mock(&server);
+        let pages = [(0, 100, 100), (100, 100, 100), (200, 50, 50)].map(|(start, limit, count)| {
+            page_mock(
+                &server,
+                test_page_request(start, limit),
+                200,
+                runs_page(Some(1000), start, count),
+            )
+        });
+
+        let page = test_runs_with_limit(&server, 250).unwrap();
+
+        auth.assert_calls(1);
+        for mock in pages {
+            mock.assert_calls(1);
+        }
+        assert_eq!(run_ids(&page), expected_run_ids(250));
+        assert_eq!(page.total, Some(1000));
+        assert_eq!(page.start, Some(0));
+        assert_eq!(page.limit, Some(250));
+    }
+
+    #[test]
+    fn a_limit_below_the_page_size_is_one_smaller_request() {
+        let server = MockServer::start();
+        let _auth = auth_mock(&server);
+        let graphql = page_mock(
+            &server,
+            test_page_request(0, 30),
+            200,
+            runs_page(Some(1000), 0, 30),
+        );
+
+        let page = test_runs_with_limit(&server, 30).unwrap();
+
+        graphql.assert_calls(1);
+        assert_eq!(run_ids(&page), expected_run_ids(30));
+        assert_eq!(page.limit, Some(30));
+    }
+
+    #[test]
+    fn paging_stops_when_the_total_is_reached_before_the_limit() {
+        let server = MockServer::start();
+        let _auth = auth_mock(&server);
+        let first = page_mock(
+            &server,
+            test_page_request(0, 100),
+            200,
+            runs_page(Some(150), 0, 100),
+        );
+        let second = page_mock(
+            &server,
+            test_page_request(100, 100),
+            200,
+            runs_page(Some(150), 100, 50),
+        );
+
+        let page = test_runs_with_limit(&server, 1000).unwrap();
+
+        first.assert_calls(1);
+        second.assert_calls(1);
+        assert_eq!(run_ids(&page), expected_run_ids(150));
+        assert_eq!(page.total, Some(150));
+        assert_eq!(page.limit, Some(1000));
+    }
+
+    #[test]
+    fn paging_stops_when_a_page_has_no_total() {
+        let server = MockServer::start();
+        let _auth = auth_mock(&server);
+        let first = page_mock(
+            &server,
+            test_page_request(0, 100),
+            200,
+            runs_page(None, 0, 100),
+        );
+
+        let page = test_runs_with_limit(&server, 250).unwrap();
+
+        first.assert_calls(1);
+        assert_eq!(run_ids(&page), expected_run_ids(100));
+        assert_eq!(page.total, None);
+    }
+
+    #[test]
+    fn paging_stops_when_a_page_returns_no_runs() {
+        let empty_pages = [
+            runs_page(Some(1000), 100, 0),
+            serde_json::json!({"data": {"getTestRuns": {"total": 1000, "results": null}}}),
+        ];
+        for empty_page in empty_pages {
+            let server = MockServer::start();
+            let _auth = auth_mock(&server);
+            let first = page_mock(
+                &server,
+                test_page_request(0, 100),
+                200,
+                runs_page(Some(1000), 0, 100),
+            );
+            let second = page_mock(&server, test_page_request(100, 100), 200, empty_page);
+
+            let page = test_runs_with_limit(&server, 250).unwrap();
+
+            first.assert_calls(1);
+            second.assert_calls(1);
+            assert_eq!(run_ids(&page), expected_run_ids(100));
+            assert_eq!(page.total, Some(1000));
+        }
+    }
+
+    #[test]
+    fn a_failed_second_page_fails_the_call() {
+        let failures = [
+            (500, serde_json::json!({}), "Xray API error (HTTP 500)"),
+            (
+                200,
+                serde_json::json!({"errors": [{"message": "start out of range"}]}),
+                "Xray GraphQL query failed",
+            ),
+        ];
+        for (status, body, expected) in failures {
+            let server = MockServer::start();
+            let _auth = auth_mock(&server);
+            let first = page_mock(
+                &server,
+                test_page_request(0, 100),
+                200,
+                runs_page(Some(1000), 0, 100),
+            );
+            let second = page_mock(&server, test_page_request(100, 100), status, body);
+
+            let error = test_runs_with_limit(&server, 250).unwrap_err();
+
+            first.assert_calls(1);
+            second.assert_calls(1);
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn every_page_carries_the_filter_statuses_and_details_query() {
+        let server = MockServer::start();
+        let auth = auth_mock(&server);
+        let pages = [(0, 100, 100), (100, 50, 50)].map(|(start, limit, count)| {
+            page_mock(
+                &server,
+                serde_json::json!({
+                    "query": DOCUMENTED_GET_TEST_RUNS_FOR_TEST_EXECUTION_DETAILS_QUERY,
+                    "variables": {
+                        "testExecIssueIds": ["10500"],
+                        "statuses": ["FAILED", "TODO"],
+                        "limit": limit,
+                        "start": start,
+                    },
+                }),
+                200,
+                runs_page(Some(400), start, count),
+            )
+        });
+
+        let page = client(&server)
+            .test_runs(
+                XrayIssueKind::TestExecution,
+                "10500",
+                Some(&["FAILED".to_owned(), "TODO".to_owned()]),
+                true,
+                150,
+            )
+            .unwrap();
+
+        auth.assert_calls(1);
+        for mock in pages {
+            mock.assert_calls(1);
+        }
+        assert_eq!(run_ids(&page), expected_run_ids(150));
+    }
+
+    #[test]
+    fn the_final_page_rules() {
+        assert!(is_final_page(Some(1000), 100, 0));
+        assert!(is_final_page(None, 0, 100));
+        assert!(is_final_page(Some(150), 100, 50));
+        assert!(is_final_page(Some(120), 100, 50));
+        assert!(!is_final_page(Some(151), 100, 50));
+        assert!(!is_final_page(Some(1000), 100, 100));
     }
 
     #[test]
@@ -877,7 +1170,7 @@ mod tests {
         let graphql = graphql_mock(&server, page_body(0, 0));
 
         client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap();
 
         auth.assert();
@@ -895,7 +1188,7 @@ mod tests {
         });
 
         let error = client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap_err();
 
         assert!(matches!(error, XrayClientError::InvalidAuthResponse));
@@ -911,7 +1204,7 @@ mod tests {
         });
 
         let error = client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap_err();
 
         assert!(matches!(error, XrayClientError::ResponseTooLarge));
@@ -928,7 +1221,7 @@ mod tests {
         });
 
         let error = client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap_err();
 
         assert!(matches!(error, XrayClientError::ResponseTooLarge));
@@ -941,7 +1234,7 @@ mod tests {
         let _graphql = graphql_mock(&server, serde_json::json!({"data": null}));
 
         let error = client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap_err();
 
         assert!(matches!(error, XrayClientError::InvalidGraphQlResponse));
@@ -957,7 +1250,7 @@ mod tests {
         );
 
         let error = client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap_err();
 
         assert_eq!(error.to_string(), "Xray GraphQL query failed");
@@ -982,7 +1275,7 @@ mod tests {
         );
 
         let error = client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap_err();
         let rendered = error.to_string();
 
@@ -1019,7 +1312,7 @@ mod tests {
         let graphql = graphql_mock(&server, page_body(0, 0));
 
         let error = client(&server)
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap_err();
 
         auth_redirect.assert_calls(1);
@@ -1052,7 +1345,7 @@ mod tests {
             });
 
             let error = client(&server)
-                .test_runs(XrayIssueKind::Test, "10400", None, false)
+                .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
                 .unwrap_err();
             let rendered = error.to_string();
 
@@ -1074,7 +1367,7 @@ mod tests {
             });
 
             let error = client(&server)
-                .test_runs(XrayIssueKind::Test, "10400", None, false)
+                .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
                 .unwrap_err();
             let expected = match status {
                 401 => {
@@ -1202,7 +1495,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         let error = client
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap_err();
 
         assert!(
@@ -1234,7 +1527,7 @@ mod tests {
         let client = XrayClient::new(&config).unwrap();
 
         let error = client
-            .test_runs(XrayIssueKind::Test, "10400", None, false)
+            .test_runs(XrayIssueKind::Test, "10400", None, false, 100)
             .unwrap_err();
 
         assert!(matches!(error, XrayClientError::Http { .. }));
@@ -1302,6 +1595,7 @@ mod tests {
                 "10400",
                 Some(&[adversarial.to_owned()]),
                 false,
+                100,
             )
             .unwrap_err();
 
