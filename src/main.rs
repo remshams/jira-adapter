@@ -101,7 +101,7 @@ enum AttachmentsCommand {
 struct AttachmentFilters {
     /// Select attachments whose Jira filename matches this case-sensitive
     /// glob. Repeat for several. An attachment matching any --name or --id
-    /// is selected; without either, every attachment is.
+    /// is selected; without either, all attachments are selected.
     #[arg(
         long = "name",
         value_name = "GLOB",
