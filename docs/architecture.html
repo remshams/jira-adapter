@@ -685,8 +685,8 @@
     bearer token as a bare JSON string, read up to 64 KiB. The token lives only
     for this call.</li>
     <li><code>POST api/v2/graphql</code> with the bearer token and the <code>getTestRuns</code> query for the
-    numeric issue ID, once per page. A Test sends the ID as <code>testIssueIds</code>, a Test Execution or
-    Sub Test Execution as <code>testExecIssueIds</code>. Both kinds select the same run
+    numeric issue ID, once per page. A Test sends the ID as <code>testIssueIds</code>, a Test
+    Execution or Sub Test Execution as <code>testExecIssueIds</code>. Both kinds select the same run
     fields; <code>--details</code> adds <code>comment</code>, <code>defects</code>, <code>evidence</code>, <code>steps</code> and
     <code>results</code> to them. Tests pin all four query texts. <code>--status</code> values travel
     as a GraphQL variable, never as query text. Each response is read up to
@@ -763,8 +763,9 @@
   <code>returned</code> counts the runs of all fetched pages, <code>start</code> is 0 and <code>limit</code> is the
   requested <code>--limit</code>, which defaults to 100 and accepts 1 to 1000. <code>truncated</code> is
   <code>total &gt; returned</code>, or null without a total. <code>--sort started-on</code> reorders the runs
-  of all fetched pages, newest first unless <code>--direction asc</code> is given. Runs with a missing or unparseable <code>startedOn</code> come after dated runs,
-  and null entries come last. Ties break by run ID, then by original position.</p>
+  of all fetched pages, newest first unless <code>--direction asc</code> is given. Runs with
+  a missing or unparseable <code>startedOn</code> come after dated runs, and null entries come
+  last. Ties break by run ID, then by original position.</p>
 
   <p><code>issue attachments list</code> prints pretty JSON with <code>issue</code>, <code>returned</code> and
   <code>attachments</code> (<a href="adr/0010-list-and-select-attachments.md">ADR 0010</a>). Each
