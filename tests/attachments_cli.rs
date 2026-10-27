@@ -676,3 +676,285 @@ fn list_requires_json_and_the_bare_form_is_a_usage_error() {
     }
     metadata_mock.assert_calls(0);
 }
+
+fn no_content_requests(server: &MockServer) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        when.method(GET).path_includes("/attachment/content/");
+        then.status(200);
+    })
+}
+
+fn report_ticket(server: &MockServer) -> httpmock::Mock<'_> {
+    metadata(
+        server,
+        serde_json::json!([
+            attachment("10001", "nightly-report.html", 6),
+            attachment("10002", "server.log", 3),
+            attachment("10003", "Summary.HTML", 7),
+            attachment("10004", "screenshot.png", 3),
+        ]),
+    )
+}
+
+#[test]
+fn filtered_download_writes_and_requests_only_selected_attachments() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let metadata_mock = report_ticket(&server);
+    let report_mock = content(&server, "/rest/api/3/attachment/content/10001", b"report");
+    let screenshot_mock = content(&server, "/rest/api/3/attachment/content/10004", b"png");
+    let other_mock = server.mock(|when, then| {
+        when.method(GET)
+            .path_matches(r"/attachment/content/1000[23]$");
+        then.status(200);
+    });
+
+    let output = run(
+        &server,
+        root.path(),
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--name",
+            "*.html",
+            "--id",
+            "10004",
+        ],
+    );
+
+    metadata_mock.assert_calls(1);
+    report_mock.assert_calls(1);
+    screenshot_mock.assert_calls(1);
+    other_mock.assert_calls(0);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"# ABC-123 attachments\n\n- 10001-nightly-report.html\n- 10004-screenshot.png\n"
+    );
+    assert!(output.stderr.is_empty());
+    let mut files: Vec<String> = fs::read_dir(root.path().join("ABC-123"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["10001-nightly-report.html", "10004-screenshot.png"]);
+}
+
+#[test]
+fn name_filter_matches_the_jira_filename_not_the_name_on_disk() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let metadata_mock = metadata(
+        &server,
+        serde_json::json!([attachment("10001", "report [draft].pdf", 4)]),
+    );
+    let content_mock = content(&server, "/rest/api/3/attachment/content/10001", b"data");
+
+    let output = run(
+        &server,
+        root.path(),
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--name",
+            "report ?draft?.pdf",
+        ],
+    );
+
+    metadata_mock.assert_calls(1);
+    content_mock.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"# ABC-123 attachments\n\n- 10001-report-draft-.pdf\n"
+    );
+}
+
+#[test]
+fn limits_apply_to_the_selected_attachments_only() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let metadata_mock = metadata(
+        &server,
+        serde_json::json!([
+            attachment("10001", "huge.bin", 20 * 1024 * 1024 * 1024 + 1),
+            attachment("10002", "small.txt", 4),
+        ]),
+    );
+    let content_mock = content(&server, "/rest/api/3/attachment/content/10002", b"data");
+
+    let output = run(
+        &server,
+        root.path(),
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--id",
+            "10002",
+        ],
+    );
+
+    metadata_mock.assert_calls(1);
+    content_mock.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"# ABC-123 attachments\n\n- 10002-small.txt\n"
+    );
+}
+
+#[test]
+fn download_filter_matching_nothing_prints_no_attachments_and_creates_no_directory() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let metadata_mock = report_ticket(&server);
+    let content_mock = no_content_requests(&server);
+
+    let output = run(
+        &server,
+        root.path(),
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--name",
+            "summary.html",
+        ],
+    );
+
+    metadata_mock.assert_calls(1);
+    content_mock.assert_calls(0);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"# ABC-123 attachments\n\nNo attachments.\n");
+    assert!(output.stderr.is_empty());
+    assert!(!root.path().join("ABC-123").exists());
+}
+
+#[test]
+fn filtered_list_prints_only_selected_attachments() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let metadata_mock = report_ticket(&server);
+    let content_mock = no_content_requests(&server);
+
+    let output = run(
+        &server,
+        root.path(),
+        &[
+            "issue",
+            "attachments",
+            "list",
+            "ABC-123",
+            "--json",
+            "--name",
+            "*.HTML",
+            "--name",
+            "*.log",
+        ],
+    );
+
+    metadata_mock.assert_calls(1);
+    content_mock.assert_calls(0);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["returned"], 2);
+    assert_eq!(json["attachments"][0]["id"], "10002");
+    assert_eq!(json["attachments"][1]["id"], "10003");
+}
+
+#[test]
+fn list_filter_matching_nothing_prints_an_empty_list() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let metadata_mock = report_ticket(&server);
+
+    let output = run(
+        &server,
+        root.path(),
+        &[
+            "issue",
+            "attachments",
+            "list",
+            "ABC-123",
+            "--json",
+            "--id",
+            "99999",
+        ],
+    );
+
+    metadata_mock.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"{\n  \"issue\": \"ABC-123\",\n  \"returned\": 0,\n  \"attachments\": []\n}\n"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn an_invalid_glob_is_a_usage_error_before_any_request() {
+    let server = MockServer::start();
+    let root = tempfile::tempdir().unwrap();
+    let any_mock = server.mock(|when, then| {
+        when.any_request();
+        then.status(200);
+    });
+
+    for args in [
+        &[
+            "issue",
+            "attachments",
+            "list",
+            "ABC-123",
+            "--json",
+            "--name",
+            "report[",
+        ][..],
+        &[
+            "issue",
+            "attachments",
+            "download",
+            "ABC-123",
+            "--name",
+            "report[",
+        ][..],
+    ] {
+        let output = run(&server, root.path(), args);
+
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.starts_with("error: invalid value 'report[' for '--name <GLOB>'"),
+            "{stderr}"
+        );
+    }
+    any_mock.assert_calls(0);
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn an_invalid_glob_is_reported_before_missing_configuration() {
+    let root = tempfile::tempdir().unwrap();
+
+    let output = jcli_in(
+        root.path(),
+        &["issue", "attachments", "download", "ABC-123", "--name", "["],
+        &[],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .starts_with("error: invalid value '[' for '--name <GLOB>'")
+    );
+}
