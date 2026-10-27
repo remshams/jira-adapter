@@ -2,6 +2,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::adf;
+use crate::attachment_list::AttachmentListOutput;
 use crate::attachments;
 use crate::config;
 use crate::issue_key::IssueKey;
@@ -24,6 +25,14 @@ pub(crate) fn search_issues(jql: &str, limit: u32) -> ! {
     let client = or_exit(JiraClient::new(&config), 3);
     let page = or_exit(client.search_issues(jql, limit), 3);
     write_stdout(&IssueSearchOutput::from_page(jql, page).to_pretty_json());
+}
+
+pub(crate) fn list_attachments(value: &str) -> ! {
+    let issue_key = parse_issue_key(value);
+    let config = load_config();
+    let client = or_exit(JiraClient::new(&config), 3);
+    let metadata = or_exit(client.attachments(&issue_key), 3);
+    write_stdout(&AttachmentListOutput::from_attachments(&issue_key, metadata).to_pretty_json());
 }
 
 pub(crate) fn download_attachments(value: &str, output_directory: Option<PathBuf>) -> ! {
