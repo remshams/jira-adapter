@@ -32,9 +32,9 @@ pub struct IssueSearchEntry {
 
 impl IssueSearchOutput {
     /// Builds the CLI output from the issues of all fetched search pages.
-    /// `truncated` is `!isLast` of the last fetched page: true when the limit
-    /// or a missing page token stopped paging while more issues match, and
-    /// null when Jira did not say.
+    /// `truncated` is `!isLast` of the last fetched page: true when the limit,
+    /// a missing page token or an empty page stopped paging while more issues
+    /// match, and null when Jira did not say.
     pub fn from_results(jql: &str, results: SearchResults) -> Self {
         let issues: Vec<IssueSearchEntry> = results
             .issues
