@@ -1,13 +1,11 @@
 ---
 name: jira
-description: "Read Jira Cloud data with jcli: print an issue as Markdown, search issues with JQL, download an issue's attachments, list an Xray test issue's test runs, and check which account the configured credentials belong to. Use whenever the user asks to read, find, or inspect a Jira issue, its attachments, or its Xray test runs, or to check which account the credentials belong to."
+description: "Read Jira Cloud issues, attachments and Xray test runs with jcli. Use when the user asks about Jira issues or mentions \"jcli\"."
 ---
 
 # Jira with jcli
 
 Use `jcli` from PATH for every Jira read. If `command -v jcli` fails, stop and report the install step to the user: `cargo install --path <checkout>`, with `~/.cargo/bin` on PATH. Do not fall back to calling the Jira REST API yourself.
-
-The CLI help is the source of truth for commands, flags, and defaults. Run `jcli --help` or `jcli <command> <subcommand> --help` when this skill doesn't answer a question. This skill covers what the help leaves out: output formats, paging limits and error handling.
 
 ## Configuration
 
@@ -25,15 +23,15 @@ Run `jcli whoami` to check the setup. It prints `Display Name <email> (accountId
 
 ## Commands
 
-Issue keys must be canonical, such as `ABC-123`: a project key of 2 to 10 uppercase letters or digits starting with a letter, then a number without leading zeroes. jcli rejects anything else before it loads configuration, so uppercase a lowercase key first.
+Run `jcli --help` and `jcli <command> <subcommand> --help` for the commands, their flags, defaults and limits. The notes below cover what the help and the output leave out.
 
-- `jcli issue read <ISSUE>` prints the issue as Markdown: the key and summary as a heading, then type, status, assignee, reporter, created timestamp, labels, the attachment count, and the description (`No description.` when empty). Comments, issue links and custom fields are not included. Use it when you need the content of one issue.
-- `jcli issue search --jql <JQL> --json [--limit <N>]` finds issues. `--json` is required. jcli passes the JQL to Jira unchanged, so sort with `ORDER BY` in the query. It returns only the first page, 20 issues by default and at most 100. The JSON has `jql`, `returned`, `truncated`, and `issues`, each with `key`, `issueType`, `status`, `summary`, `created`, `updated`, and `labels`. `truncated: true` means more issues match than were returned; narrow the JQL instead of expecting a next page. To find an issue by its numeric ID, search with `--jql "id = <ID>"`. Search to find keys, then `issue read` the ones you need.
-- `jcli issue attachments <ISSUE> [--out <DIRECTORY>]` downloads every attachment of the issue into `./<ISSUE>/` in the current directory, or into `--out`. jcli creates the directory if needed and replaces files of the same name. Each file is named `<attachment-id>-<filename>`, where each run of characters other than ASCII letters, digits, `.` and `-` becomes one `-`. Use the names stdout prints instead of predicting them: it lists them as `- <name>` bullets under a `# <ISSUE> attachments` heading, or prints `No attachments.` and creates no directory. On failure stdout is empty, and files from earlier attachments or earlier runs may already be in the directory; don't treat them as a complete set. Unix only.
-- `jcli xray test-runs <ISSUE> --json [--status <STATUS>]... [--sort started-on [--direction asc|desc]]` lists the test runs of an Xray test issue. `--json` is required. Repeat `--status` to keep several statuses. jcli fetches one page of at most 100 test runs, and `--sort` reorders only that page (direction defaults to `desc`). The JSON has `testKey`, `total`, `returned`, `truncated`, `start`, `limit`, and `runs`, each with `id`, `status`, `startedOn`, `finishedOn`, and `testExecutionIssueId`. `testExecutionIssueId` is a numeric issue ID, which `issue read` rejects; get its key with `jcli issue search --jql "id = <testExecutionIssueId>" --json`. Check `truncated` before drawing conclusions about the full history.
-- `jcli whoami` prints the authenticated account, as above.
+- Issue keys must be canonical, such as `ABC-123`. jcli rejects a lowercase key before it loads configuration, so uppercase it first.
+- `issue read` leaves out comments, issue links and custom fields.
+- `issue search` returns only the first page of results. `truncated: true` means more issues match; narrow the JQL instead of expecting a next page. To find an issue by its numeric ID, search with `--jql "id = <ID>"`.
+- `issue attachments` replaces files of the same name. Take the file names from the `- <name>` lines on stdout instead of predicting them. On failure stdout is empty, and files from earlier attachments or earlier runs may already be in the directory; don't treat them as a complete set.
+- `xray test-runs` fetches one page of at most 100 test runs. Check `truncated` before drawing conclusions about the full history. `testExecutionIssueId` is a numeric issue ID, which `issue read` rejects; get its key with `jcli issue search --jql "id = <testExecutionIssueId>" --json`.
 
-In JSON output, missing scalar values are `null` rather than empty strings, and missing `labels` are `[]`. Entries in `runs` can themselves be `null`. In both commands, `truncated: null` means jcli can't tell whether more results exist.
+In JSON output, missing scalar values are `null` rather than empty strings, and missing `labels` are `[]`. Entries in `runs` can themselves be `null`. In both JSON commands, `truncated: null` means jcli can't tell whether more results exist.
 
 ## Errors
 
