@@ -15,12 +15,13 @@ use crate::config::Config;
 use crate::issue_key::IssueKey;
 use crate::jira::attachment::{Attachment, AttachmentIssue, MAX_ATTACHMENT_ID_BYTES};
 use crate::jira::issue::{Account, Issue, IssueReference, IssueType};
+use crate::jira::link::RemoteLink;
 use crate::jira::search::{SearchPage, SearchResults};
 use crate::output::terminal_field;
 
 const USER_AGENT: &str = concat!("jcli/", env!("CARGO_PKG_VERSION"));
 const ISSUE_FIELDS: &str =
-    "summary,issuetype,status,assignee,reporter,labels,created,description,attachment";
+    "summary,issuetype,status,assignee,reporter,labels,created,description,attachment,issuelinks";
 const SEARCH_FIELDS: &str = "summary,status,issuetype,created,updated,labels";
 /// The most issues jcli asks Jira for in one search request.
 const SEARCH_PAGE_SIZE: usize = 100;
@@ -155,6 +156,20 @@ impl JiraClient {
         // complete response so a large attachment list cannot bypass its
         // metadata limit through `issue read`.
         self.get_bounded_metadata_json_url(url, "issue")
+    }
+
+    /// Returns the issue's remote links, such as pull request URLs, in Jira's
+    /// order. The endpoint is not paged, so one request returns all of them.
+    pub fn remote_links(&self, issue_key: &IssueKey) -> Result<Vec<RemoteLink>, JiraClientError> {
+        let url = self.endpoint_url(&[
+            "rest",
+            "api",
+            "3",
+            "issue",
+            issue_key.as_str(),
+            "remotelink",
+        ])?;
+        self.get_bounded_metadata_json_url(url, "remote links")
     }
 
     /// Returns the numeric issue ID (for example `"10400"`) and the issue
@@ -479,6 +494,7 @@ fn read_bounded_body(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, Jir
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jira::link::IssueLink;
     use httpmock::Method::GET;
     use httpmock::MockServer;
     use std::io::Write;
@@ -568,6 +584,13 @@ mod tests {
                         "filename": "report.pdf",
                         "size": 42,
                         "content": "https://ignored.example/content"
+                    }],
+                    "issuelinks": [{
+                        "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+                        "outwardIssue": {
+                            "key": "ABC-2",
+                            "fields": {"summary": "Other", "status": {"name": "Done"}}
+                        }
                     }]
                 }
             }));
@@ -592,6 +615,15 @@ mod tests {
         );
         assert_eq!(issue.fields.attachment.len(), 1);
         assert_eq!(issue.fields.attachment[0].id, "opaque-id");
+        assert_eq!(
+            issue.fields.issue_links,
+            [IssueLink {
+                relation: Some("blocks".to_string()),
+                key: Some("ABC-2".to_string()),
+                summary: Some("Other".to_string()),
+                status: Some("Done".to_string()),
+            }]
+        );
         let description = issue.fields.description.unwrap();
         assert_eq!(description.node_type, "doc");
         assert_eq!(description.content[0].node_type, "paragraph");
@@ -599,6 +631,89 @@ mod tests {
             description.content[0].content[0].text.as_deref(),
             Some("Description")
         );
+    }
+
+    #[test]
+    fn issue_fields_include_issue_links() {
+        assert_eq!(
+            ISSUE_FIELDS,
+            "summary,issuetype,status,assignee,reporter,labels,created,description,attachment,issuelinks"
+        );
+    }
+
+    fn remote_links_mock<'a>(
+        server: &'a MockServer,
+        status: u16,
+        body: &str,
+    ) -> httpmock::Mock<'a> {
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/issue/ABC-123/remotelink")
+                .query_param_count(r".*", r".*", 0)
+                .header("Authorization", AUTH_HEADER);
+            then.status(status).body(body);
+        })
+    }
+
+    fn remote_links(server: &MockServer) -> Result<Vec<RemoteLink>, JiraClientError> {
+        client(server).remote_links(&"ABC-123".parse().unwrap())
+    }
+
+    #[test]
+    fn remote_links_request_the_remotelink_endpoint_once_and_keep_jira_order() {
+        let server = MockServer::start();
+        let mock = remote_links_mock(
+            &server,
+            200,
+            r#"[
+                {"id": 1, "object": {"url": "https://github.com/acme/repo/pull/1", "title": "PR 1"}},
+                {"id": 2, "object": {"url": "https://example.com/doc", "title": "Doc"}}
+            ]"#,
+        );
+
+        let links = remote_links(&server).unwrap();
+
+        mock.assert_calls(1);
+        assert_eq!(
+            links,
+            [
+                RemoteLink {
+                    title: Some("PR 1".to_string()),
+                    url: Some("https://github.com/acme/repo/pull/1".to_string()),
+                },
+                RemoteLink {
+                    title: Some("Doc".to_string()),
+                    url: Some("https://example.com/doc".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_links_map_404_to_not_found_remote_links() {
+        let server = MockServer::start();
+        let mock = remote_links_mock(&server, 404, "private body");
+
+        let error = remote_links(&server).unwrap_err();
+
+        mock.assert_calls(1);
+        assert_eq!(error.to_string(), "not found (404): remote links");
+    }
+
+    #[test]
+    fn remote_link_responses_are_bounded() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/rest/api/3/issue/ABC-123/remotelink");
+            then.status(200)
+                .body(vec![b' '; MAX_ATTACHMENT_METADATA_BYTES + 1]);
+        });
+
+        let error = remote_links(&server).unwrap_err();
+
+        mock.assert_calls(1);
+        assert!(matches!(error, JiraClientError::MetadataTooLarge));
     }
 
     fn issue_reference_mock(server: &MockServer, body: serde_json::Value) -> httpmock::Mock<'_> {
