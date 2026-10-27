@@ -121,9 +121,9 @@ impl AttachmentFilters {
 
 #[derive(Subcommand)]
 enum XrayCommand {
-    /// List a test issue's test runs as JSON
+    /// List the test runs of an Xray Test or Test Execution as JSON
     TestRuns {
-        /// Canonical test issue key (e.g. TEST-123)
+        /// Canonical key of a Test or Test Execution issue (e.g. TEST-123)
         issue: String,
         /// Emit JSON output (required in this version)
         #[arg(long, required = true)]
