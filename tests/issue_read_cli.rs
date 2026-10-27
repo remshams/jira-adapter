@@ -101,7 +101,7 @@ fn reads_comments_across_pages_with_the_comments_flag() {
     );
     let remote_mock = remote_links_mock(&server, 200, "[]");
     let mut first_page = (1..=99)
-        .map(|_| comment("Bot", "2026-10-17T00:00:00.000+0000", "ping"))
+        .map(|_| comment("Bot", "2026-10-17T12:00:00.000+0000", "ping"))
         .collect::<Vec<_>>();
     first_page.insert(
         0,
@@ -147,7 +147,7 @@ fn reads_comments_across_pages_with_the_comments_flag() {
     first.assert_calls(1);
     second.assert_calls(1);
     assert_eq!(output.status.code(), Some(0));
-    let bots = "### Bot · 2026-10-17T00:00:00.000+0000\n\nping\n\n".repeat(99);
+    let bots = "### Bot · 2026-10-17T12:00:00.000+0000\n\nping\n\n".repeat(99);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         format!(
