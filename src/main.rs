@@ -132,7 +132,7 @@ enum XrayCommand {
         /// Repeat for several values; omit to keep every status.
         #[arg(long = "status", value_name = "STATUS")]
         statuses: Vec<String>,
-        /// Sort the returned page (not the full history) by this field
+        /// Sort the returned runs (not the full history) by this field
         #[arg(long, value_enum, value_name = "FIELD")]
         sort: Option<TestRunSortField>,
         /// Sort order for --sort; defaults to desc
@@ -142,6 +142,14 @@ enum XrayCommand {
         /// automated results with their error log
         #[arg(long)]
         details: bool,
+        /// Maximum number of runs to return (1-1000)
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 100,
+            value_parser = clap::value_parser!(u32).range(1..=1000)
+        )]
+        limit: u32,
     },
 }
 
@@ -191,6 +199,7 @@ fn run_xray(command: XrayCommand) -> ! {
             sort,
             direction,
             details,
-        } => commands::xray_test_runs(&issue, statuses, sort, direction, details),
+            limit,
+        } => commands::xray_test_runs(&issue, statuses, sort, direction, details, limit),
     }
 }
