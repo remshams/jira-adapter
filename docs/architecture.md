@@ -14,7 +14,7 @@ blocking reqwest, without an async runtime ([ADR 0002](adr/0002-build-jcli-as-a-
 | `jcli issue search --jql <JQL> --json [--limit N]` | The first page of matching issues as JSON |
 | `jcli issue attachments list <KEY> --json [--name GLOB]... [--id ID]...` | The issue's attachment metadata as JSON |
 | `jcli issue attachments download <KEY> [--out DIR] [--name GLOB]... [--id ID]...` | A Markdown list of the downloaded files |
-| `jcli xray test-runs <KEY> --json [--status S]... [--sort started-on] [--direction asc\|desc]` | The first page of test runs of a Test or Test Execution issue as JSON |
+| `jcli xray test-runs <KEY> --json [--status S]... [--sort started-on] [--direction asc\|desc] [--details]` | The first page of test runs of a Test or Test Execution issue as JSON |
 | `jcli whoami` | The account the credentials belong to, on one line |
 
 `<KEY>` is a canonical issue key such as `ABC-123`: a project part of 2 to 10
@@ -269,8 +269,10 @@ It sends two requests per `xray test-runs` call, and neither changes Xray data:
    for this call.
 2. `POST api/v2/graphql` with the bearer token and the `getTestRuns` query for the
    numeric issue ID. A Test sends the ID as `testIssueIds`, a Test Execution or
-   Sub Test Execution as `testExecIssueIds`; each kind has its own query text.
-   `limit` is 100 and `start` is 0. `--status` values travel as a GraphQL
+   Sub Test Execution as `testExecIssueIds`. Both kinds select the same run
+   fields; `--details` adds `comment`, `defects`, `evidence`, `steps` and
+   `results` to them. Tests pin all four query texts. `limit` is 100 and `start`
+   is 0. `--status` values travel as a GraphQL
    variable, never as query text. The response is read up to 16 MiB.
 
 The Xray client follows no redirects, because both requests carry credentials. It
@@ -325,7 +327,12 @@ to 100. An empty result exits 0 with `"issues": []`.
 `testExecution` and names the filter that was queried, so an empty `runs` list
 means the key has no runs. Each run has `id`, `status`,
 `startedOn`, `finishedOn` and `testExecutionIssueId`; a null entry from Xray stays
-null. `truncated` is `total > returned`, or null without a total. `--sort
+null. With `--details` each run also has `comment`, `defects` (issue IDs),
+`evidence` (`filename`, `downloadLink`), `steps` (`status`, `actualResult`,
+`comment`, `evidence`) and `results` (`name`, `status`, `log`, `duration`). `log`
+holds the error output of an automated result. jcli doesn't download evidence and
+passes `downloadLink` through. A missing value or list is null, and a null list
+entry stays null. `truncated` is `total > returned`, or null without a total. `--sort
 started-on` reorders only the returned page, newest first unless `--direction asc`
 is given. Runs with a missing or unparseable `startedOn` come after dated runs,
 and null entries come last. Ties break by run ID, then by original position.

@@ -259,7 +259,7 @@
         <tr><td><code>jcli issue search --jql &lt;JQL&gt; --json [--limit N]</code></td><td>The first page of matching issues as JSON</td></tr>
         <tr><td><code>jcli issue attachments list &lt;KEY&gt; --json [--name GLOB]... [--id ID]...</code></td><td>The issue's attachment metadata as JSON</td></tr>
         <tr><td><code>jcli issue attachments download &lt;KEY&gt; [--out DIR] [--name GLOB]... [--id ID]...</code></td><td>A Markdown list of the downloaded files</td></tr>
-        <tr><td><code>jcli xray test-runs &lt;KEY&gt; --json [--status S]... [--sort started-on] [--direction asc|desc]</code></td><td>The first page of test runs of a Test or Test Execution issue as JSON</td></tr>
+        <tr><td><code>jcli xray test-runs &lt;KEY&gt; --json [--status S]... [--sort started-on] [--direction asc|desc] [--details]</code></td><td>The first page of test runs of a Test or Test Execution issue as JSON</td></tr>
         <tr><td><code>jcli whoami</code></td><td>The account the credentials belong to, on one line</td></tr>
       </tbody>
     </table>
@@ -673,8 +673,10 @@
     for this call.</li>
     <li><code>POST api/v2/graphql</code> with the bearer token and the <code>getTestRuns</code> query for the
     numeric issue ID. A Test sends the ID as <code>testIssueIds</code>, a Test Execution or
-    Sub Test Execution as <code>testExecIssueIds</code>; each kind has its own query text.
-    <code>limit</code> is 100 and <code>start</code> is 0. <code>--status</code> values travel as a GraphQL
+    Sub Test Execution as <code>testExecIssueIds</code>. Both kinds select the same run
+    fields; <code>--details</code> adds <code>comment</code>, <code>defects</code>, <code>evidence</code>, <code>steps</code> and
+    <code>results</code> to them. Tests pin all four query texts. <code>limit</code> is 100 and <code>start</code>
+    is 0. <code>--status</code> values travel as a GraphQL
     variable, never as query text. The response is read up to 16 MiB.</li>
   </ol>
 
@@ -728,7 +730,12 @@
   <code>testExecution</code> and names the filter that was queried, so an empty <code>runs</code> list
   means the key has no runs. Each run has <code>id</code>, <code>status</code>,
   <code>startedOn</code>, <code>finishedOn</code> and <code>testExecutionIssueId</code>; a null entry from Xray stays
-  null. <code>truncated</code> is <code>total &gt; returned</code>, or null without a total. <code>--sort
+  null. With <code>--details</code> each run also has <code>comment</code>, <code>defects</code> (issue IDs),
+  <code>evidence</code> (<code>filename</code>, <code>downloadLink</code>), <code>steps</code> (<code>status</code>, <code>actualResult</code>,
+  <code>comment</code>, <code>evidence</code>) and <code>results</code> (<code>name</code>, <code>status</code>, <code>log</code>, <code>duration</code>). <code>log</code>
+  holds the error output of an automated result. jcli doesn't download evidence and
+  passes <code>downloadLink</code> through. A missing value or list is null, and a null list
+  entry stays null. <code>truncated</code> is <code>total &gt; returned</code>, or null without a total. <code>--sort
   started-on</code> reorders only the returned page, newest first unless <code>--direction asc</code>
   is given. Runs with a missing or unparseable <code>startedOn</code> come after dated runs,
   and null entries come last. Ties break by run ID, then by original position.</p>
