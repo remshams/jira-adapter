@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Proposed
 
 ## Date
 
@@ -26,7 +26,9 @@ matches exist, an opaque `nextPageToken` that requests the next page.
   request after the first adds the previous page's `nextPageToken`; `jql` and
   `fields` stay the same.
 - Paging stops when `--limit` issues are collected, when a page has
-  `isLast: true`, or when a page has no `nextPageToken`.
+  `isLast: true`, when a page has no `nextPageToken`, or when a page adds no
+  issues, so a server that keeps sending tokens for empty pages cannot keep
+  jcli requesting forever.
 - The output keeps its shape. Issues keep Jira's order across pages, and
   `returned` counts the issues of all pages. `truncated` is `!isLast` of the last
   fetched page: `true` when the limit or a missing token stopped paging while
