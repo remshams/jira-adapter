@@ -674,8 +674,8 @@
     <li><code>POST api/v2/graphql</code> with the bearer token and the <code>getTestRuns</code> query for the
     numeric issue ID. A Test sends the ID as <code>testIssueIds</code>, a Test Execution or
     Sub Test Execution as <code>testExecIssueIds</code>; each kind has its own query text.
-    <code>limit</code> is 100 and <code>start</code> is 0. <code>--status</code> values travel as a GraphQL variable, never as query
-    text. The response is read up to 16 MiB.</li>
+    <code>limit</code> is 100 and <code>start</code> is 0. <code>--status</code> values travel as a GraphQL
+    variable, never as query text. The response is read up to 16 MiB.</li>
   </ol>
 
   <p>The Xray client follows no redirects, because both requests carry credentials. It
