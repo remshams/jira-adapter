@@ -23,9 +23,9 @@ pub struct Comments {
 /// One page of `GET rest/api/3/issue/{key}/comment`. Unknown fields such as
 /// `startAt` and `maxResults` are ignored; the client tracks its own offset.
 #[derive(Debug, Deserialize)]
-pub struct CommentPage {
-    pub comments: Option<Vec<Comment>>,
-    pub total: Option<usize>,
+pub(crate) struct CommentPage {
+    pub(crate) comments: Option<Vec<Comment>>,
+    pub(crate) total: Option<usize>,
 }
 
 /// Jira's comment entry. Only the author's display name, `created` and the
