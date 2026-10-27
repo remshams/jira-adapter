@@ -76,18 +76,15 @@ fn render_body(document: Option<&AdfDocument>, placeholder: &str) -> String {
         .to_string()
 }
 
-/// The comments oldest first, each under a `###` heading, or `None`. A last
-/// line says how many comments Jira reports when fewer were fetched.
+/// The comments oldest first, each under a `###` heading, or `None`. When
+/// fewer comments were fetched than Jira reports, a line says so first,
+/// directly under the section heading, where no comment body can imitate it.
 fn render_comments(comments: &Comments) -> String {
-    let mut blocks = comments
-        .comments
-        .iter()
-        .map(render_comment)
-        .collect::<Vec<_>>();
-    if blocks.is_empty() {
+    let mut blocks = truncation_note(comments).into_iter().collect::<Vec<_>>();
+    if comments.comments.is_empty() {
         blocks.push("None".to_string());
     }
-    blocks.extend(truncation_note(comments));
+    blocks.extend(comments.comments.iter().map(render_comment));
     format!("## Comments\n\n{}", blocks.join("\n\n"))
 }
 
@@ -1795,7 +1792,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "## Comments\n\n### A · 2026-10-17T00:00:00Z\n\nx\n\nShowing the first 1 of 1500 comments.\n"
+            "## Comments\n\nShowing the first 1 of 1500 comments.\n\n### A · 2026-10-17T00:00:00Z\n\nx\n"
         );
     }
 
