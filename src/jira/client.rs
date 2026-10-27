@@ -548,6 +548,7 @@ mod tests {
     use httpmock::MockServer;
     use std::io::Write;
     use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Instant;
 
@@ -766,7 +767,9 @@ mod tests {
     }
 
     /// Mocks one comment page requested from `start_at` for `max_results`
-    /// comments, oldest first. No other query parameter is accepted.
+    /// comments, oldest first. No other query parameter is accepted. The mock
+    /// answers only the first such request, so a client that requests the
+    /// same page again gets a 404 instead of looping.
     fn comment_page_mock(
         server: &MockServer,
         start_at: usize,
@@ -774,6 +777,8 @@ mod tests {
         status: u16,
         body: serde_json::Value,
     ) -> httpmock::Mock<'_> {
+        let served = AtomicBool::new(false);
+        let start = start_at.to_string();
         server.mock(move |when, then| {
             when.method(GET)
                 .path("/rest/api/3/issue/ABC-123/comment")
@@ -781,7 +786,11 @@ mod tests {
                 .query_param("maxResults", max_results.to_string())
                 .query_param("orderBy", "created")
                 .query_param_count(r".*", r".*", 3)
-                .header("Authorization", AUTH_HEADER);
+                .header("Authorization", AUTH_HEADER)
+                .is_true(move |request| {
+                    request.query_params_map().get("startAt") == Some(&start)
+                        && !served.swap(true, Ordering::SeqCst)
+                });
             then.status(status).json_body(body);
         })
     }
