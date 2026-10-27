@@ -4,6 +4,7 @@ use common::jcli;
 use httpmock::Method::GET;
 use httpmock::MockServer;
 use std::process::Output;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // base64 of "cli@example.com:cli-test-token"
 const AUTH_HEADER: &str = "Basic Y2xpQGV4YW1wbGUuY29tOmNsaS10ZXN0LXRva2Vu";
@@ -48,12 +49,16 @@ fn remote_links_mock<'a>(server: &'a MockServer, status: u16, body: &str) -> htt
     })
 }
 
+/// Mocks one comment page. It answers only the first request for `start_at`,
+/// so a repeated request gets a 404 instead of the same page again.
 fn comments_mock<'a>(
     server: &'a MockServer,
     start_at: &str,
     status: u16,
     body: serde_json::Value,
 ) -> httpmock::Mock<'a> {
+    let served = AtomicBool::new(false);
+    let start = start_at.to_string();
     let start_at = start_at.to_string();
     server.mock(move |when, then| {
         when.method(GET)
@@ -62,7 +67,11 @@ fn comments_mock<'a>(
             .query_param("maxResults", "100")
             .query_param("orderBy", "created")
             .query_param_count(r".*", r".*", 3)
-            .header("Authorization", AUTH_HEADER);
+            .header("Authorization", AUTH_HEADER)
+            .is_true(move |request| {
+                request.query_params_map().get("startAt") == Some(&start)
+                    && !served.swap(true, Ordering::SeqCst)
+            });
         then.status(status).json_body(body);
     })
 }
