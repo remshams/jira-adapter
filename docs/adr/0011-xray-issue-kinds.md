@@ -38,12 +38,11 @@ unverified:
   and is queried with `testIssueIds: [id]`. `Test Execution` becomes
   `TestExecution` and is queried with `testExecIssueIds: [id]`. Xray's default
   sub-task type `Sub Test Execution` is a Test Execution too and maps to
-  `TestExecution`. Names match
-  exactly and case-sensitively. Jira's response types stay in `src/jira/`.
+  `TestExecution`. Names match exactly and case-sensitively. Jira's response types stay in `src/jira/`.
 - Any other type, or a missing or empty type name, exits 3 with one line such as
-  `error: ABC-1 is a Story, not an Xray Test or Test Execution`, and jcli sends no
-  Xray request. The type name is Jira data, so it is reduced to one
-  terminal-safe line. Without a name the message says `an unknown issue type`.
+  `error: ABC-1 is not an Xray Test or Test Execution (issue type: Story)`, and
+  jcli sends no Xray request. The type name is Jira data, so it is reduced to one
+  terminal-safe line. Without a name the message says `issue type: unknown`.
 - Each kind has its own GraphQL query constant, and tests pin both query texts
   and the exact variables sent per kind. Both call only `getTestRuns`, so the
   read-only rule of [ADR 0005](0005-read-only-get-only-http-layer.md) holds.
