@@ -673,6 +673,12 @@ fn xray_settings_are_not_required_for_jira_commands() {
             "fields": {"summary": "Fix it", "status": {"name": "Open"}}
         }));
     });
+    let remote_links = server.mock(|when, then| {
+        when.method(GET)
+            .path("/rest/api/3/issue/ABC-123/remotelink")
+            .header("Authorization", JIRA_AUTH_HEADER);
+        then.status(200).json_body(serde_json::json!([]));
+    });
 
     let output = jcli(
         &["issue", "read", "ABC-123"],
@@ -684,6 +690,7 @@ fn xray_settings_are_not_required_for_jira_commands() {
     );
 
     jira_issue.assert_calls(1);
+    remote_links.assert_calls(1);
     assert_eq!(output.status.code(), Some(0));
 }
 
