@@ -20,7 +20,8 @@ pub(crate) fn read_issue(value: &str) -> ! {
     let config = load_config();
     let client = or_exit(JiraClient::new(&config), 3);
     let issue = or_exit(client.issue(&issue_key), 3);
-    write_stdout(&adf::render_issue(&issue));
+    let remote_links = or_exit(client.remote_links(&issue_key), 3);
+    write_stdout(&adf::render_issue(&issue, &remote_links));
 }
 
 pub(crate) fn search_issues(jql: &str, limit: u32) -> ! {
