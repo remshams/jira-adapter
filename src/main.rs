@@ -138,6 +138,10 @@ enum XrayCommand {
         /// Sort order for --sort; defaults to desc
         #[arg(long, value_enum, requires = "sort", value_name = "DIRECTION")]
         direction: Option<TestRunSortDirection>,
+        /// Add each run's comment, defects, evidence, step results and
+        /// automated results with their error log
+        #[arg(long)]
+        details: bool,
     },
 }
 
@@ -186,6 +190,7 @@ fn run_xray(command: XrayCommand) -> ! {
             statuses,
             sort,
             direction,
-        } => commands::xray_test_runs(&issue, statuses, sort, direction),
+            details,
+        } => commands::xray_test_runs(&issue, statuses, sort, direction, details),
     }
 }
