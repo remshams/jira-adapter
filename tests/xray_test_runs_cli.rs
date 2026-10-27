@@ -376,7 +376,7 @@ fn another_issue_type_exits_three_without_an_xray_request() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "error: TEST-123 is a Story, not an Xray Test or Test Execution\n"
+        "error: TEST-123 is not an Xray Test or Test Execution (issue type: Story)\n"
     );
 }
 
@@ -395,7 +395,7 @@ fn type_names_match_case_sensitively() {
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "error: TEST-123 is a test execution, not an Xray Test or Test Execution\n"
+        "error: TEST-123 is not an Xray Test or Test Execution (issue type: test execution)\n"
     );
 }
 
@@ -417,7 +417,7 @@ fn a_missing_issue_type_exits_three_without_an_xray_request() {
         assert!(output.stdout.is_empty());
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
-            "error: TEST-123 is an unknown issue type, not an Xray Test or Test Execution\n",
+            "error: TEST-123 is not an Xray Test or Test Execution (issue type: unknown)\n",
             "{fields}"
         );
     }
@@ -437,7 +437,7 @@ fn an_issue_type_with_control_characters_is_printed_on_one_safe_line() {
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "error: TEST-123 is an Epic [31mspoof, not an Xray Test or Test Execution\n"
+        "error: TEST-123 is not an Xray Test or Test Execution (issue type: Epic [31mspoof)\n"
     );
 }
 
