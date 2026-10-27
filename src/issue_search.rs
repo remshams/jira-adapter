@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use crate::jira::search::SearchPage;
+use crate::jira::search::SearchResults;
 use crate::output;
 
 /// Stable JSON output of `jcli issue search`. Issues keep Jira's order, so
 /// ordering is controlled through `ORDER BY` in the JQL. Timestamps are
 /// passed through as Jira returns them. `truncated` is null when Jira did
-/// not say whether this is the last page.
+/// not say whether the last fetched page is its last page.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IssueSearchOutput {
@@ -31,12 +31,13 @@ pub struct IssueSearchEntry {
 }
 
 impl IssueSearchOutput {
-    /// Builds the CLI output from the first search page. A missing or null
-    /// issue list counts as an empty result.
-    pub fn from_page(jql: &str, page: SearchPage) -> Self {
-        let issues: Vec<IssueSearchEntry> = page
+    /// Builds the CLI output from the issues of all fetched search pages.
+    /// `truncated` is `!isLast` of the last fetched page: true when the limit
+    /// or a missing page token stopped paging while more issues match, and
+    /// null when Jira did not say.
+    pub fn from_results(jql: &str, results: SearchResults) -> Self {
+        let issues: Vec<IssueSearchEntry> = results
             .issues
-            .unwrap_or_default()
             .into_iter()
             .map(|issue| {
                 let fields = issue.fields;
@@ -54,7 +55,7 @@ impl IssueSearchOutput {
         IssueSearchOutput {
             jql: jql.to_owned(),
             returned: issues.len(),
-            truncated: page.is_last.map(|is_last| !is_last),
+            truncated: results.is_last.map(|is_last| !is_last),
             issues,
         }
     }
@@ -69,15 +70,21 @@ impl IssueSearchOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jira::search::SearchPage;
     use serde_json::json;
 
-    fn page(value: serde_json::Value) -> SearchPage {
-        serde_json::from_value(value).unwrap()
+    /// Search results built from one Jira page in its JSON form.
+    fn page(value: serde_json::Value) -> SearchResults {
+        let page: SearchPage = serde_json::from_value(value).unwrap();
+        SearchResults {
+            issues: page.issues.unwrap_or_default(),
+            is_last: page.is_last,
+        }
     }
 
     #[test]
     fn renders_the_exact_json_contract() {
-        let output = IssueSearchOutput::from_page(
+        let output = IssueSearchOutput::from_results(
             "project = ABC ORDER BY created DESC",
             page(json!({
                 "issues": [{
@@ -122,10 +129,14 @@ mod tests {
     }
 
     #[test]
-    fn truncation_follows_is_last() {
-        let more = IssueSearchOutput::from_page("x", page(json!({"issues": [], "isLast": false})));
-        let last = IssueSearchOutput::from_page("x", page(json!({"issues": [], "isLast": true})));
-        let unknown = IssueSearchOutput::from_page("x", page(json!({"issues": []})));
+    fn truncation_follows_is_last_of_the_last_fetched_page() {
+        // `more` is a search that stopped at its limit on a page that was not
+        // Jira's last one.
+        let more =
+            IssueSearchOutput::from_results("x", page(json!({"issues": [], "isLast": false})));
+        let last =
+            IssueSearchOutput::from_results("x", page(json!({"issues": [], "isLast": true})));
+        let unknown = IssueSearchOutput::from_results("x", page(json!({"issues": []})));
 
         assert_eq!(more.truncated, Some(true));
         assert_eq!(last.truncated, Some(false));
@@ -136,7 +147,7 @@ mod tests {
 
     #[test]
     fn missing_values_stay_null_and_labels_become_empty() {
-        let output = IssueSearchOutput::from_page(
+        let output = IssueSearchOutput::from_results(
             "x",
             page(json!({
                 "issues": [
@@ -167,7 +178,7 @@ mod tests {
 
     #[test]
     fn issue_types_and_statuses_without_a_name_are_null() {
-        let output = IssueSearchOutput::from_page(
+        let output = IssueSearchOutput::from_results(
             "x",
             page(json!({
                 "issues": [
@@ -190,7 +201,7 @@ mod tests {
 
     #[test]
     fn issues_keep_jira_order() {
-        let output = IssueSearchOutput::from_page(
+        let output = IssueSearchOutput::from_results(
             "x",
             page(json!({"issues": [
                 {"key": "ABC-3", "fields": {"created": "2026-01-01T00:00:00.000+0000"}},
@@ -208,22 +219,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_null_issue_lists_are_empty_results() {
-        for value in [
-            json!({"isLast": true}),
-            json!({"issues": null, "isLast": true}),
-        ] {
-            let output = IssueSearchOutput::from_page("x", page(value));
-
-            assert_eq!(output.returned, 0);
-            assert!(output.issues.is_empty());
-        }
-    }
-
-    #[test]
     fn pretty_json_escapes_terminal_controls_and_round_trips() {
         let summary = "Fix\u{202E}gnirts\u{9B}31m\u{7F}";
-        let output = IssueSearchOutput::from_page(
+        let output = IssueSearchOutput::from_results(
             "summary ~ \"\u{2066}x\"",
             page(json!({"issues": [{"key": "ABC-1", "fields": {"summary": summary}}]})),
         );
