@@ -44,4 +44,4 @@ was first built; their Date is the date they were recorded.
 | [0009](0009-attachment-downloads.md) | Stream attachments into verified, atomically replaced files | Partially superseded by [ADR 0010](0010-list-and-select-attachments.md) |
 | [0010](0010-list-and-select-attachments.md) | List attachments and select which ones to download | Accepted |
 | [0011](0011-xray-issue-kinds.md) | Xray issue kinds for test runs | Proposed |
-| [0012](0012-search-paging.md) | Page issue search up to 1000 issues | Accepted |
+| [0012](0012-search-paging.md) | Page issue search up to 1000 issues | Proposed |
