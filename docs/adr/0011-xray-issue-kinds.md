@@ -24,8 +24,8 @@ Jira was unreachable while this was planned, so three assumptions are
 unverified:
 
 - Nightly report tickets are Xray Test Execution issues.
-- The instance uses Xray's default issue type names, `Test` and
-  `Test Execution`.
+- The instance uses Xray's default issue type names, `Test`,
+  `Test Execution` and `Sub Test Execution`.
 - `getTestRuns` accepts `testExecIssueIds` and returns the same page shape as
   with `testIssueIds`.
 
@@ -36,7 +36,9 @@ unverified:
   reader, and it returns the numeric ID and the issue type name.
 - The Xray side maps the type name to an `XrayIssueKind`. `Test` becomes `Test`
   and is queried with `testIssueIds: [id]`. `Test Execution` becomes
-  `TestExecution` and is queried with `testExecIssueIds: [id]`. Names match
+  `TestExecution` and is queried with `testExecIssueIds: [id]`. Xray's default
+  sub-task type `Sub Test Execution` is a Test Execution too and maps to
+  `TestExecution`. Names match
   exactly and case-sensitively. Jira's response types stay in `src/jira/`.
 - Any other type, or a missing or empty type name, exits 3 with one line such as
   `error: ABC-1 is a Story, not an Xray Test or Test Execution`, and jcli sends no
