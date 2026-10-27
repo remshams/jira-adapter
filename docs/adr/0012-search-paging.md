@@ -32,8 +32,8 @@ matches exist, an opaque `nextPageToken` that requests the next page.
 - The output keeps its shape. Issues keep Jira's order across pages, and
   `returned` counts the issues of all pages. `truncated` is `!isLast` of the last
   fetched page: `true` when the limit, a missing token or an empty page stopped
-  paging while Jira reports more matches, `false` on Jira's last page, and `null` when that
-  page has no `isLast`.
+  paging while Jira reports more matches, `false` on Jira's last page, and `null`
+  when that page has no `isLast`.
 - A failed page fails the whole command and stdout stays empty. A 400 on any page
   is reported as `invalid JQL query (400): ...`, as for the first page. Each
   page is read through the 16 MiB bounded metadata reader.
