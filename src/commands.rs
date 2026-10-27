@@ -11,7 +11,9 @@ use crate::issue_search::IssueSearchOutput;
 use crate::jira::client::JiraClient;
 use crate::output::terminal_field;
 use crate::xray::client::XrayClient;
-use crate::xray::test_runs::{TestRunSortDirection, TestRunSortField, TestRunsOutput, sort_page};
+use crate::xray::test_runs::{
+    TestRunSortDirection, TestRunSortField, TestRunsOutput, XrayIssueKind, sort_page,
+};
 
 pub(crate) fn read_issue(value: &str) -> ! {
     let issue_key = parse_issue_key(value);
@@ -75,21 +77,27 @@ pub(crate) fn xray_test_runs(
     let config = load_config();
     let xray_config = or_exit(config::XrayConfig::load(), 2);
     let jira_client = or_exit(JiraClient::new(&config), 3);
-    let issue_id = or_exit(jira_client.issue_id(&issue_key), 3);
+    let issue = or_exit(jira_client.issue_reference(&issue_key), 3);
+    // The issue type picks the Xray filter. Any other type fails here,
+    // before an Xray request is sent.
+    let kind = or_exit(
+        XrayIssueKind::for_issue(issue_key.as_str(), issue.issue_type.as_deref()),
+        3,
+    );
     let xray_client = or_exit(XrayClient::new(&xray_config), 3);
     let statuses = if statuses.is_empty() {
         None
     } else {
         Some(statuses.as_slice())
     };
-    let mut page = or_exit(xray_client.test_runs(&issue_id, statuses), 3);
+    let mut page = or_exit(xray_client.test_runs(kind, &issue.id, statuses), 3);
     if let Some(field) = sort {
         // A sort without an explicit direction defaults to desc. Sorting
         // applies only to the returned page, never to the full history.
         let direction = direction.unwrap_or(TestRunSortDirection::Desc);
         sort_page(&mut page, field, direction);
     }
-    write_stdout(&TestRunsOutput::from_page(issue_key.as_str(), &page).to_pretty_json());
+    write_stdout(&TestRunsOutput::from_page(issue_key.as_str(), kind, &page).to_pretty_json());
 }
 
 pub(crate) fn whoami() -> ! {
