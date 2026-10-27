@@ -10,7 +10,7 @@ blocking reqwest, without an async runtime ([ADR 0002](adr/0002-build-jcli-as-a-
 
 | Command | Output on stdout |
 | --- | --- |
-| `jcli issue read <KEY>` | The issue as Markdown, with its issue links and remote links |
+| `jcli issue read <KEY> [--comments]` | The issue as Markdown, with its issue links and remote links, and with `--comments` up to 1000 comments |
 | `jcli issue search --jql <JQL> --json [--limit N]` | Up to N matching issues as JSON, fetched page by page |
 | `jcli issue attachments list <KEY> --json [--name GLOB]... [--id ID]...` | The issue's attachment metadata as JSON |
 | `jcli issue attachments download <KEY> [--out DIR] [--name GLOB]... [--id ID]...` | A Markdown list of the downloaded files |
@@ -72,7 +72,8 @@ with one Jira request. A `Test`, `Test Execution` or `Sub Test Execution` issue
 goes on to Xray with the matching filter. Any other or missing type exits 3 before
 jcli sends an Xray request ([ADR 0011](adr/0011-xray-issue-kinds.md)).
 `issue read` sends the issue request first and the remote link request second.
-If either fails, the command exits 3 and prints nothing on stdout
+With `--comments` it then sends the comment requests. If any of them fails, the
+command exits 3 and prints nothing on stdout
 ([ADR 0013](adr/0013-issue-read-links-and-comments.md)).
 `issue attachments download` checks for Unix before it loads the configuration and
 exits 4 on other platforms. `issue attachments list` runs on every platform.
@@ -95,16 +96,19 @@ agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
   `XrayConfig` and `XrayClient` uses.
 - `src/jira/`: the Jira side of the anti-corruption layer. `client.rs` is the
   GET-only HTTP client with status mapping, body limits, JQL error redaction and
-  the search page loop. `issue.rs`, `attachment.rs`, `link.rs` and `search.rs`
-  are serde models that deserialize only the fields jcli requests. Jira's names such as
-  `issuetype` and `isLast` stop at their serde attributes, and `nextPageToken`
-  never leaves the client. `search.rs` also holds `SearchResults`, the issues of
-  all fetched pages with the last page's `isLast`. `issue.rs` also holds
-  `IssueReference`, the value object with the numeric ID and issue type name that
-  `xray test-runs` needs. `link.rs` holds the value objects `IssueLink` (relation
-  text, key, summary and status of a linked issue) and `RemoteLink` (title and
-  URL). Jira's link shapes, such as `outwardIssue` and `object`, stay private to
-  that file.
+  the search and comment page loops. `issue.rs`, `attachment.rs`, `link.rs`,
+  `comment.rs` and `search.rs` are serde models that deserialize only the fields
+  jcli requests. Jira's names such as `issuetype` and `isLast` stop at their
+  serde attributes, and `nextPageToken` never leaves the client. `search.rs`
+  also holds `SearchResults`, the issues of all fetched pages with the last
+  page's `isLast`. `issue.rs` also holds `IssueReference`, the value object with
+  the numeric ID and issue type name that `xray test-runs` needs. `link.rs`
+  holds the value objects `IssueLink` (relation text, key, summary and status of
+  a linked issue) and `RemoteLink` (title and URL). Jira's link shapes, such as
+  `outwardIssue` and `object`, stay private to that file. `comment.rs` holds the
+  value object `Comment` (author display name, created timestamp and ADF body)
+  and `Comments`, the comments of all fetched pages with the last page's
+  `total`. Jira's comment author object stays private to that file.
 - `src/xray/`: the Xray side. `client.rs` exchanges the API key for a bearer token
   and runs the `getTestRuns` GraphQL query with the filter for the issue kind,
   page by page, and merges the pages into one. `test_runs.rs` holds
@@ -133,7 +137,8 @@ contract. That translation is where Jira and Xray shapes end. There are two
 exceptions. In `xray test-runs`, `XrayIssueKind` turns the type name from
 `IssueReference` into `Test` or `TestExecution`, which picks the Xray filter. In
 `issue read`, `jira::link` maps each Jira link to `IssueLink` or `RemoteLink`
-during deserialization, so `adf` never sees the link direction.
+during deserialization, so `adf` never sees the link direction, and
+`jira::comment` keeps only the author's display name of each comment.
 
 Arrows show the imports that exist between modules.
 
@@ -155,6 +160,7 @@ flowchart TD
     Commands --> Output[output]
     Adf --> JiraModels[jira::issue]
     Adf --> JiraLink[jira::link]
+    Adf --> JiraComment[jira::comment]
     Attachments --> JiraClient
     Attachments --> JiraAttachment[jira::attachment]
     Attachments --> IssueKey
@@ -170,6 +176,8 @@ flowchart TD
     JiraModels --> JiraAttachment
     JiraModels --> JiraLink
     JiraClient --> JiraLink
+    JiraClient --> JiraComment
+    JiraComment --> JiraModels
     JiraClient --> JiraAttachment
     JiraClient --> JiraSearch
     JiraClient --> Output
@@ -248,7 +256,7 @@ timeout: a large video keeps downloading while data arrives.
 | Command | Request |
 | --- | --- |
 | `whoami` | `GET rest/api/3/myself` |
-| `issue read` | `GET rest/api/3/issue/{key}?fields=summary,issuetype,status,assignee,reporter,labels,created,description,attachment,issuelinks`, then `GET rest/api/3/issue/{key}/remotelink` |
+| `issue read` | `GET rest/api/3/issue/{key}?fields=summary,issuetype,status,assignee,reporter,labels,created,description,attachment,issuelinks`, then `GET rest/api/3/issue/{key}/remotelink`; with `--comments` then `GET rest/api/3/issue/{key}/comment?startAt=N&maxResults=N&orderBy=created` per page |
 | `issue search` | `GET rest/api/3/search/jql?jql=...&maxResults=N&fields=summary,status,issuetype,created,updated,labels`, then the same request with `&nextPageToken=...` per further page |
 | `issue attachments list` | `GET rest/api/3/issue/{key}?fields=attachment` |
 | `issue attachments download` | `GET rest/api/3/issue/{key}?fields=attachment`, then `GET rest/api/3/attachment/content/{id}?redirect=false` per attachment |
@@ -267,9 +275,17 @@ collected so far. A request after the first adds the previous page's
 no `nextPageToken`, or when a page adds no issues. A failed page fails the whole
 search.
 
-Issue, remote link, search and attachment metadata responses are read into
-memory up to 16 MiB; a larger body fails without truncation. The limit applies to each search
-page. `whoami` reads its small response without that limit.
+`issue read --comments` pages through the comments oldest first
+([ADR 0013](adr/0013-issue-read-links-and-comments.md)). Each request asks for
+`min(100, 1000 - fetched)` comments with `startAt` set to the number fetched so
+far. Paging stops at 1000 comments, when `startAt` plus the page's comments
+reach `total`, when a page has no `total`, or when a page has no comments. A
+failed page fails the whole command.
+
+Issue, remote link, comment, search and attachment metadata responses are read
+into memory up to 16 MiB; a larger body fails without truncation. The limit
+applies to each search and comment page. `whoami` reads its small response
+without that limit.
 
 Status codes map to fixed messages: 401 names `JIRA_EMAIL` and `JIRA_API_TOKEN`,
 403 is a permission error, 404 names the resource, 429 asks to retry later, and
@@ -342,6 +358,14 @@ Invalid arguments get clap's multi-line usage message and exit 2.
 
 - <relation> <key>: <summary> (<status>)
 - Remote: <title> <<url>>
+
+## Comments
+
+### <author> · <created>
+
+<comment body rendered as Markdown, or No content.>
+
+Showing the first <shown> of <total> comments.
 ```
 
 `## Links` is always shown. It lists the issue links, then the remote links,
@@ -353,13 +377,23 @@ remote link shows its URL as an autolink only when it is an absolute `http` or
 value shows as `Unknown`
 ([ADR 0013](adr/0013-issue-read-links-and-comments.md)).
 
-Metadata and link values are reduced to one line, have control and bidirectional
-formatting characters removed and have Markdown characters escaped. The ADF
-renderer handles paragraphs, headings, bullet and ordered lists, code blocks,
-blockquotes, hard breaks and the `strong`, `em`, `code` and `link` marks. Links
-render only for absolute `http` and `https` URLs. For an unknown node it renders
-the text and known child content it can find instead of failing the issue.
-Comments are not rendered.
+`## Comments` is shown only with `--comments`. It lists the comments oldest
+first, each under a `###` line with the author's display name and the created
+timestamp as Jira returns it, or says `None`. A missing or empty body shows as
+`No content.` and a missing or blank author or timestamp as `Unknown`.
+Headings in a comment body move three levels down, to at most level 6, so they
+nest under the comment's `###` line and cannot pose as a section. The
+`Showing the first ...` line appears only when Jira's `total` is higher than the
+number of comments shown, for example past 1000 comments.
+
+Metadata, link values, comment authors and comment timestamps are reduced to
+one line, have control and bidirectional formatting characters removed and have
+Markdown characters escaped. The ADF renderer handles paragraphs, headings,
+bullet and ordered lists, code blocks, blockquotes, hard breaks and the
+`strong`, `em`, `code` and `link` marks, in the description and in comment
+bodies. Links render only for absolute `http` and `https` URLs. For an unknown
+node it renders the text and known child content it can find instead of failing
+the issue.
 
 `issue search` prints pretty JSON with `jql`, `returned`, `truncated` and
 `issues`. `returned` counts the issues of all fetched pages. `truncated` is

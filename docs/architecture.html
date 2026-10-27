@@ -255,7 +255,7 @@
     <table>
       <thead><tr><th scope="col">Command</th><th scope="col">Output on stdout</th></tr></thead>
       <tbody>
-        <tr><td><code>jcli issue read &lt;KEY&gt;</code></td><td>The issue as Markdown, with its issue links and remote links</td></tr>
+        <tr><td><code>jcli issue read &lt;KEY&gt; [--comments]</code></td><td>The issue as Markdown, with its issue links and remote links, and with <code>--comments</code> up to 1000 comments</td></tr>
         <tr><td><code>jcli issue search --jql &lt;JQL&gt; --json [--limit N]</code></td><td>Up to N matching issues as JSON, fetched page by page</td></tr>
         <tr><td><code>jcli issue attachments list &lt;KEY&gt; --json [--name GLOB]... [--id ID]...</code></td><td>The issue's attachment metadata as JSON</td></tr>
         <tr><td><code>jcli issue attachments download &lt;KEY&gt; [--out DIR] [--name GLOB]... [--id ID]...</code></td><td>A Markdown list of the downloaded files</td></tr>
@@ -400,7 +400,8 @@
   goes on to Xray with the matching filter. Any other or missing type exits 3 before
   jcli sends an Xray request (<a href="adr/0011-xray-issue-kinds.md">ADR 0011</a>).
   <code>issue read</code> sends the issue request first and the remote link request second.
-  If either fails, the command exits 3 and prints nothing on stdout
+  With <code>--comments</code> it then sends the comment requests. If any of them fails, the
+  command exits 3 and prints nothing on stdout
   (<a href="adr/0013-issue-read-links-and-comments.md">ADR 0013</a>).
   <code>issue attachments download</code> checks for Unix before it loads the configuration and
   exits 4 on other platforms. <code>issue attachments list</code> runs on every platform.</p>
@@ -425,8 +426,9 @@
     <code>XrayConfig</code> and <code>XrayClient</code> uses.</li>
     <li><a href="../src/jira/"><code>src/jira/</code></a>: the Jira side of the anti-corruption layer. <a href="../src/jira/client.rs"><code>client.rs</code></a> is the
     GET-only HTTP client with status mapping, body limits, JQL error redaction and
-    the search page loop. <a href="../src/jira/issue.rs"><code>issue.rs</code></a>, <a href="../src/jira/attachment.rs"><code>attachment.rs</code></a>, <a href="../src/jira/link.rs"><code>link.rs</code></a> and <a href="../src/jira/search.rs"><code>search.rs</code></a>
-    are serde models that deserialize only the fields jcli requests. Jira's names such as
+    the search and comment page loops. <a href="../src/jira/issue.rs"><code>issue.rs</code></a>, <a href="../src/jira/attachment.rs"><code>attachment.rs</code></a>, <a href="../src/jira/link.rs"><code>link.rs</code></a>,
+    <a href="../src/jira/comment.rs"><code>comment.rs</code></a> and <a href="../src/jira/search.rs"><code>search.rs</code></a> are serde models that deserialize only the
+    fields jcli requests. Jira's names such as
     <code>issuetype</code> and <code>isLast</code> stop at their serde attributes, and <code>nextPageToken</code>
     never leaves the client. <a href="../src/jira/search.rs"><code>search.rs</code></a> also holds <code>SearchResults</code>, the issues of
     all fetched pages with the last page's <code>isLast</code>. <a href="../src/jira/issue.rs"><code>issue.rs</code></a> also holds
@@ -434,7 +436,10 @@
     <code>xray test-runs</code> needs. <a href="../src/jira/link.rs"><code>link.rs</code></a> holds the value objects <code>IssueLink</code> (relation
     text, key, summary and status of a linked issue) and <code>RemoteLink</code> (title and
     URL). Jira's link shapes, such as <code>outwardIssue</code> and <code>object</code>, stay private to
-    that file.</li>
+    that file. <a href="../src/jira/comment.rs"><code>comment.rs</code></a> holds the value object <code>Comment</code> (author display name,
+    created timestamp and ADF body) and <code>Comments</code>, the comments of all fetched
+    pages with the last page's <code>total</code>. Jira's comment author object stays private
+    to that file.</li>
     <li><a href="../src/xray/"><code>src/xray/</code></a>: the Xray side. <a href="../src/xray/client.rs"><code>client.rs</code></a> exchanges the API key for a bearer token
     and runs the <code>getTestRuns</code> GraphQL query with the filter for the issue kind,
     page by page, and merges the pages into one. <a href="../src/xray/test_runs.rs"><code>test_runs.rs</code></a> holds
@@ -464,7 +469,8 @@
   exceptions. In <code>xray test-runs</code>, <code>XrayIssueKind</code> turns the type name from
   <code>IssueReference</code> into <code>Test</code> or <code>TestExecution</code>, which picks the Xray filter. In
   <code>issue read</code>, <code>jira::link</code> maps each Jira link to <code>IssueLink</code> or <code>RemoteLink</code>
-  during deserialization, so <code>adf</code> never sees the link direction.</p>
+  during deserialization, so <code>adf</code> never sees the link direction, and
+  <code>jira::comment</code> keeps only the author's display name of each comment.</p>
 
   <p>Arrows show the imports that exist between modules.</p>
 
@@ -472,7 +478,7 @@
     <div class="diagram">
       <svg viewBox="-200 0 1200 520" role="img" aria-labelledby="deps-title deps-desc">
         <title id="deps-title">Imports between jcli modules</title>
-        <desc id="deps-desc">main imports commands, xray::test_runs and attachment_selection. commands imports issue_key, config, jira::client, xray::client, adf, attachments, attachment_list, attachment_selection, issue_search, xray::test_runs and output. attachment_list imports jira::attachment, issue_key and output. attachment_selection imports jira::attachment. adf imports jira::issue and jira::link. jira::issue imports jira::attachment and jira::link. attachments imports jira::client, jira::attachment and issue_key. issue_search imports jira::search and output. jira::client imports config, issue_key, jira::issue, jira::attachment, jira::link, jira::search and output. xray::client imports config and xray::test_runs. xray::test_runs imports output.</desc>
+        <desc id="deps-desc">main imports commands, xray::test_runs and attachment_selection. commands imports issue_key, config, jira::client, xray::client, adf, attachments, attachment_list, attachment_selection, issue_search, xray::test_runs and output. attachment_list imports jira::attachment, issue_key and output. attachment_selection imports jira::attachment. adf imports jira::issue, jira::link and jira::comment. jira::issue imports jira::attachment and jira::link. attachments imports jira::client, jira::attachment and issue_key. issue_search imports jira::search and output. jira::client imports config, issue_key, jira::issue, jira::attachment, jira::link, jira::comment, jira::search and output. jira::comment imports jira::issue. xray::client imports config and xray::test_runs. xray::test_runs imports output.</desc>
         <defs>
           <marker id="da-ink" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="h-ink" d="M0,0 L10,5 L0,10 z"/></marker>
           <marker id="da-muted" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="h-muted" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -521,6 +527,10 @@
           <!-- imports of jira::link -->
           <path class="e e-jira" marker-end="url(#da-jira)" d="M470,306 C495,312 500,322 500,342 V466 Q500,478 485,478"/>
           <path class="e e-jira" marker-end="url(#da-jira)" d="M270,310 C318,318 332,330 332,350 V466 Q332,478 345,478"/>
+          <!-- jira::comment imports and its import of jira::issue -->
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M160,316 V466 Q160,478 180,478"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M338,316 V436 Q338,448 310,460"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M285,460 L360,406"/>
           <!-- xray::client, xray::test_runs -->
           <path class="e e-xray" marker-end="url(#da-xray)" d="M900,208 C940,208 940,225 940,260 V370"/>
           <path class="e e-xray" marker-end="url(#da-xray)" d="M830,226 V280"/>
@@ -540,6 +550,7 @@
           <g class="n-jira"><rect x="180" y="370" width="140" height="36" rx="6"/><text class="m" x="250" y="393" text-anchor="middle">jira::attachment</text></g>
           <g class="n-jira"><rect x="345" y="370" width="140" height="36" rx="6"/><text class="m" x="415" y="393" text-anchor="middle">jira::issue</text></g>
           <g class="n-jira"><rect x="345" y="460" width="140" height="36" rx="6"/><text class="m" x="415" y="483" text-anchor="middle">jira::link</text></g>
+          <g class="n-jira"><rect x="180" y="460" width="140" height="36" rx="6"/><text class="m" x="250" y="483" text-anchor="middle">jira::comment</text></g>
           <g class="n-jira"><rect x="515" y="370" width="140" height="36" rx="6"/><text class="m" x="585" y="393" text-anchor="middle">jira::search</text></g>
           <g class="n-core"><rect x="680" y="370" width="140" height="36" rx="6"/><text class="m" x="750" y="393" text-anchor="middle">output</text></g>
           <g class="n-core"><rect x="845" y="370" width="140" height="36" rx="6"/><text class="m" x="915" y="393" text-anchor="middle">config</text></g>
@@ -557,13 +568,14 @@
       <ul>
         <li><code>main</code> imports <code>commands</code>, <code>xray::test_runs</code>, <code>attachment_selection</code></li>
         <li><code>commands</code> imports <code>issue_key</code>, <code>config</code>, <code>jira::client</code>, <code>xray::client</code>, <code>adf</code>, <code>attachments</code>, <code>attachment_list</code>, <code>attachment_selection</code>, <code>issue_search</code>, <code>xray::test_runs</code>, <code>output</code></li>
-        <li><code>adf</code> imports <code>jira::issue</code>, <code>jira::link</code></li>
+        <li><code>adf</code> imports <code>jira::issue</code>, <code>jira::link</code>, <code>jira::comment</code></li>
         <li><code>jira::issue</code> imports <code>jira::attachment</code>, <code>jira::link</code></li>
         <li><code>attachments</code> imports <code>jira::client</code>, <code>jira::attachment</code>, <code>issue_key</code></li>
         <li><code>attachment_list</code> imports <code>jira::attachment</code>, <code>issue_key</code>, <code>output</code></li>
         <li><code>attachment_selection</code> imports <code>jira::attachment</code></li>
         <li><code>issue_search</code> imports <code>jira::search</code>, <code>output</code></li>
-        <li><code>jira::client</code> imports <code>config</code>, <code>issue_key</code>, <code>jira::issue</code>, <code>jira::attachment</code>, <code>jira::link</code>, <code>jira::search</code>, <code>output</code></li>
+        <li><code>jira::client</code> imports <code>config</code>, <code>issue_key</code>, <code>jira::issue</code>, <code>jira::attachment</code>, <code>jira::link</code>, <code>jira::comment</code>, <code>jira::search</code>, <code>output</code></li>
+        <li><code>jira::comment</code> imports <code>jira::issue</code></li>
         <li><code>xray::client</code> imports <code>config</code>, <code>xray::test_runs</code></li>
         <li><code>xray::test_runs</code> imports <code>output</code></li>
       </ul>
@@ -652,7 +664,7 @@
       <thead><tr><th scope="col">Command</th><th scope="col">Request</th></tr></thead>
       <tbody>
         <tr><td><code>whoami</code></td><td><code>GET rest/api/3/myself</code></td></tr>
-        <tr><td><code>issue read</code></td><td><code>GET rest/api/3/issue/{key}?fields=summary,issuetype,status,assignee,reporter,labels,created,description,attachment,issuelinks</code>, then <code>GET rest/api/3/issue/{key}/remotelink</code></td></tr>
+        <tr><td><code>issue read</code></td><td><code>GET rest/api/3/issue/{key}?fields=summary,issuetype,status,assignee,reporter,labels,created,description,attachment,issuelinks</code>, then <code>GET rest/api/3/issue/{key}/remotelink</code>; with <code>--comments</code> then <code>GET rest/api/3/issue/{key}/comment?startAt=N&amp;maxResults=N&amp;orderBy=created</code> per page</td></tr>
         <tr><td><code>issue search</code></td><td><code>GET rest/api/3/search/jql?jql=...&amp;maxResults=N&amp;fields=summary,status,issuetype,created,updated,labels</code>, then the same request with <code>&amp;nextPageToken=...</code> per further page</td></tr>
         <tr><td><code>issue attachments list</code></td><td><code>GET rest/api/3/issue/{key}?fields=attachment</code></td></tr>
         <tr><td><code>issue attachments download</code></td><td><code>GET rest/api/3/issue/{key}?fields=attachment</code>, then <code>GET rest/api/3/attachment/content/{id}?redirect=false</code> per attachment</td></tr>
@@ -674,9 +686,17 @@
   no <code>nextPageToken</code>, or when a page adds no issues. A failed page fails the whole
   search.</p>
 
-  <p>Issue, remote link, search and attachment metadata responses are read into
-  memory up to 16 MiB; a larger body fails without truncation. The limit applies to each search
-  page. <code>whoami</code> reads its small response without that limit.</p>
+  <p><code>issue read --comments</code> pages through the comments oldest first
+  (<a href="adr/0013-issue-read-links-and-comments.md">ADR 0013</a>). Each request asks for
+  <code>min(100, 1000 - fetched)</code> comments with <code>startAt</code> set to the number fetched so
+  far. Paging stops at 1000 comments, when <code>startAt</code> plus the page's comments
+  reach <code>total</code>, when a page has no <code>total</code>, or when a page has no comments. A
+  failed page fails the whole command.</p>
+
+  <p>Issue, remote link, comment, search and attachment metadata responses are read
+  into memory up to 16 MiB; a larger body fails without truncation. The limit
+  applies to each search and comment page. <code>whoami</code> reads its small response
+  without that limit.</p>
 
   <p>Status codes map to fixed messages: 401 names <code>JIRA_EMAIL</code> and <code>JIRA_API_TOKEN</code>,
   403 is a permission error, 404 names the resource, 429 asks to retry later, and
@@ -747,7 +767,15 @@
 ## Links
 
 - &lt;relation&gt; &lt;key&gt;: &lt;summary&gt; (&lt;status&gt;)
-- Remote: &lt;title&gt; &lt;&lt;url&gt;&gt;</code></pre>
+- Remote: &lt;title&gt; &lt;&lt;url&gt;&gt;
+
+## Comments
+
+### &lt;author&gt; · &lt;created&gt;
+
+&lt;comment body rendered as Markdown, or No content.&gt;
+
+Showing the first &lt;shown&gt; of &lt;total&gt; comments.</code></pre>
 
   <p><code>## Links</code> is always shown. It lists the issue links, then the remote links,
   each in Jira's order, or says <code>None</code> when there are none. An issue link's
@@ -758,13 +786,23 @@
   value shows as <code>Unknown</code>
   (<a href="adr/0013-issue-read-links-and-comments.md">ADR 0013</a>).</p>
 
-  <p>Metadata and link values are reduced to one line, have control and bidirectional
-  formatting characters removed and have Markdown characters escaped. The ADF
-  renderer handles paragraphs, headings, bullet and ordered lists, code blocks,
-  blockquotes, hard breaks and the <code>strong</code>, <code>em</code>, <code>code</code> and <code>link</code> marks. Links
-  render only for absolute <code>http</code> and <code>https</code> URLs. For an unknown node it renders
-  the text and known child content it can find instead of failing the issue.
-  Comments are not rendered.</p>
+  <p><code>## Comments</code> is shown only with <code>--comments</code>. It lists the comments oldest
+  first, each under a <code>###</code> line with the author's display name and the created
+  timestamp as Jira returns it, or says <code>None</code>. A missing or empty body shows as
+  <code>No content.</code> and a missing or blank author or timestamp as <code>Unknown</code>.
+  Headings in a comment body move three levels down, to at most level 6, so they
+  nest under the comment's <code>###</code> line and cannot pose as a section. The
+  <code>Showing the first ...</code> line appears only when Jira's <code>total</code> is higher than the
+  number of comments shown, for example past 1000 comments.</p>
+
+  <p>Metadata, link values, comment authors and comment timestamps are reduced to
+  one line, have control and bidirectional formatting characters removed and have
+  Markdown characters escaped. The ADF renderer handles paragraphs, headings,
+  bullet and ordered lists, code blocks, blockquotes, hard breaks and the
+  <code>strong</code>, <code>em</code>, <code>code</code> and <code>link</code> marks, in the description and in comment
+  bodies. Links render only for absolute <code>http</code> and <code>https</code> URLs. For an unknown
+  node it renders the text and known child content it can find instead of failing
+  the issue.</p>
 
   <p><code>issue search</code> prints pretty JSON with <code>jql</code>, <code>returned</code>, <code>truncated</code> and
   <code>issues</code>. <code>returned</code> counts the issues of all fetched pages. <code>truncated</code> is
