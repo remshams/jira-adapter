@@ -23,7 +23,7 @@ pub enum XrayIssueKind {
 /// The issue exists but its type is none of Xray's default `Test`,
 /// `Test Execution` and `Sub Test Execution` types.
 #[derive(Debug, PartialEq, Eq, Error)]
-#[error("{issue_key} is {issue_type}, not an Xray Test or Test Execution")]
+#[error("{issue_key} is not an Xray Test or Test Execution (issue type: {issue_type})")]
 pub struct NotAnXrayIssue {
     issue_key: String,
     issue_type: String,
@@ -45,20 +45,10 @@ impl XrayIssueKind {
     }
 }
 
-/// Names the issue type with its indefinite article, for example `a Story`
-/// or `an Epic`. The name is Jira data, so it is reduced to one safe line.
+/// The issue type name for the error message. The name is Jira data, so it
+/// is reduced to one safe line; a missing or blank name reads `unknown`.
 fn describe_issue_type(issue_type: Option<&str>) -> String {
-    let name = terminal_field(issue_type, "");
-    let name = name.trim();
-    let Some(first) = name.chars().next() else {
-        return "an unknown issue type".to_owned();
-    };
-    let article = if "AEIOUaeiou".contains(first) {
-        "an"
-    } else {
-        "a"
-    };
-    format!("{article} {name}")
+    terminal_field(issue_type, "unknown").trim().to_owned()
 }
 
 /// Envelope of Xray's GraphQL endpoint. `errors` may be present even though
@@ -829,15 +819,11 @@ mod tests {
     fn other_types_name_the_issue_and_its_type() {
         assert_eq!(
             error_message(Some("Story")),
-            "ABC-1 is a Story, not an Xray Test or Test Execution"
+            "ABC-1 is not an Xray Test or Test Execution (issue type: Story)"
         );
         assert_eq!(
-            error_message(Some("Epic")),
-            "ABC-1 is an Epic, not an Xray Test or Test Execution"
-        );
-        assert_eq!(
-            error_message(Some("improvement")),
-            "ABC-1 is an improvement, not an Xray Test or Test Execution"
+            error_message(Some("User Story")),
+            "ABC-1 is not an Xray Test or Test Execution (issue type: User Story)"
         );
     }
 
@@ -846,7 +832,7 @@ mod tests {
         for issue_type in [None, Some(""), Some("  "), Some("\u{1b}\u{202E}")] {
             assert_eq!(
                 error_message(issue_type),
-                "ABC-1 is an unknown issue type, not an Xray Test or Test Execution",
+                "ABC-1 is not an Xray Test or Test Execution (issue type: unknown)",
                 "{issue_type:?}"
             );
         }
@@ -856,7 +842,7 @@ mod tests {
     fn the_type_name_is_reduced_to_one_terminal_safe_line() {
         assert_eq!(
             error_message(Some(" Bug\r\nreport\u{1b}[31m\u{202E} ")),
-            "ABC-1 is a Bug report[31m, not an Xray Test or Test Execution"
+            "ABC-1 is not an Xray Test or Test Execution (issue type: Bug report[31m)"
         );
     }
 
