@@ -251,8 +251,9 @@ path segments.
 `min(100, remaining)` issues, where `remaining` is `--limit` minus the issues
 collected so far. A request after the first adds the previous page's
 `nextPageToken` and keeps `jql` and `fields` unchanged. Paging stops once
-`--limit` issues are collected, when a page has `isLast: true`, or when a page
-has no `nextPageToken`. A failed page fails the whole search.
+`--limit` issues are collected, when a page has `isLast: true`, when a page has
+no `nextPageToken`, or when a page adds no issues. A failed page fails the whole
+search.
 
 Issue, search and attachment metadata responses are read into memory up to
 16 MiB; a larger body fails without truncation. The limit applies to each search
