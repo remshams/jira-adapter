@@ -84,7 +84,7 @@ fn render_links(issue_links: &[IssueLink], remote_links: &[RemoteLink]) -> Strin
 fn render_issue_link(link: &IssueLink) -> String {
     format!(
         "- {} {}: {} ({})",
-        metadata_or_unknown(link.relation.as_deref()),
+        line_start_metadata(link.relation.as_deref()),
         metadata_or_unknown(link.key.as_deref()),
         metadata_or_unknown(link.summary.as_deref()),
         metadata_or_unknown(link.status.as_deref())
@@ -98,6 +98,19 @@ fn render_remote_link(link: &RemoteLink) -> String {
     match link.url.as_deref().filter(|url| is_safe_link(url)) {
         Some(url) => format!("- Remote: {title} <{}>", escape_link_destination(url)),
         None => format!("- Remote: {title}"),
+    }
+}
+
+/// Metadata that opens a list item's text. Besides the usual escaping, a
+/// leading `-`, an ordered-list marker or indentation could start a nested
+/// block there, so leading spaces are dropped and hyphens and `1.` are escaped.
+fn line_start_metadata(value: Option<&str>) -> String {
+    let sanitized = value.map(sanitize_single_line).unwrap_or_default();
+    let text = sanitized.trim_start();
+    if text.trim().is_empty() {
+        "Unknown".to_string()
+    } else {
+        protect_ordered_list_starts(&escape_markdown(text, true))
     }
 }
 
@@ -1501,6 +1514,19 @@ mod tests {
         assert_eq!(
             output,
             "## Links\n\n- Remote: PR 1 <https://example.com/1>\n"
+        );
+    }
+
+    #[test]
+    fn a_relation_cannot_open_a_nested_block() {
+        let links = ["1. step", "- x", "---", "    code"]
+            .into_iter()
+            .map(|relation| issue_link(relation, "ABC-2", "Summary", "Open"))
+            .collect();
+
+        assert_eq!(
+            links_section(links, &[]),
+            "## Links\n\n- 1\\. step ABC-2: Summary (Open)\n- \\- x ABC-2: Summary (Open)\n- \\-\\-\\- ABC-2: Summary (Open)\n- code ABC-2: Summary (Open)\n"
         );
     }
 
