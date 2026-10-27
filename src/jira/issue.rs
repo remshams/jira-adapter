@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 use crate::jira::attachment::Attachment;
+use crate::jira::link::IssueLink;
 
 /// A Jira Cloud account, as returned by `/rest/api/3/myself` and embedded in
 /// issue fields such as assignee and reporter.
@@ -42,6 +43,8 @@ pub struct IssueFields {
     pub description: Option<AdfDocument>,
     #[serde(default)]
     pub attachment: Vec<Attachment>,
+    #[serde(default, rename = "issuelinks")]
+    pub issue_links: Vec<IssueLink>,
 }
 
 /// Jira can return an issue type object without a usable name, which
@@ -213,6 +216,7 @@ mod tests {
         .unwrap();
 
         assert!(issue.fields.labels.is_empty());
+        assert!(issue.fields.issue_links.is_empty());
         assert!(issue.fields.issue_type.is_none());
         assert!(issue.fields.created.is_none());
         assert!(
@@ -225,5 +229,34 @@ mod tests {
                 .is_none()
         );
         assert!(issue.fields.description.unwrap().content.is_empty());
+    }
+
+    #[test]
+    fn parses_issue_links_in_jira_order() {
+        let issue: Issue = serde_json::from_value(serde_json::json!({
+            "key": "ABC-123",
+            "fields": {
+                "summary": "Summary",
+                "status": {"name": "Open"},
+                "issuelinks": [
+                    {
+                        "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+                        "outwardIssue": {"key": "ABC-2"}
+                    },
+                    {
+                        "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+                        "inwardIssue": {"key": "ABC-3"}
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let links = &issue.fields.issue_links;
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].relation.as_deref(), Some("blocks"));
+        assert_eq!(links[0].key.as_deref(), Some("ABC-2"));
+        assert_eq!(links[1].relation.as_deref(), Some("is blocked by"));
+        assert_eq!(links[1].key.as_deref(), Some("ABC-3"));
     }
 }
