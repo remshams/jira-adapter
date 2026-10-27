@@ -1,9 +1,22 @@
 use serde_json::Value;
 
 use crate::jira::issue::{Account, AdfDocument, AdfMark, AdfNode, Issue};
+use crate::jira::link::{IssueLink, RemoteLink};
 
-/// Renders a complete Jira issue as stable Markdown, including its final newline.
-pub fn render_issue(issue: &Issue) -> String {
+/// Renders a complete Jira issue as stable Markdown, including its final
+/// newline. The sections follow each other in a fixed order, separated by one
+/// blank line.
+pub fn render_issue(issue: &Issue, remote_links: &[RemoteLink]) -> String {
+    let sections = [
+        render_overview(issue),
+        render_description(issue),
+        render_links(&issue.fields.issue_links, remote_links),
+    ];
+    format!("{}\n", sections.join("\n\n"))
+}
+
+/// The title line and the metadata list.
+fn render_overview(issue: &Issue) -> String {
     let key = escape_metadata(&issue.key);
     let summary = escape_metadata(&issue.fields.summary);
     let issue_type = issue
@@ -34,6 +47,13 @@ pub fn render_issue(issue: &Issue) -> String {
         labels.join(", ")
     };
     let attachment_count = issue.fields.attachment.len();
+
+    format!(
+        "# {key}: {summary}\n\n- Type: {issue_type}\n- Status: {status}\n- Assignee: {assignee}\n- Reporter: {reporter}\n- Created: {created}\n- Labels: {labels}\n- Attachments: {attachment_count}"
+    )
+}
+
+fn render_description(issue: &Issue) -> String {
     let description = issue
         .fields
         .description
@@ -42,11 +62,49 @@ pub fn render_issue(issue: &Issue) -> String {
         .map(render_document)
         .filter(|rendered| !rendered.trim().is_empty())
         .unwrap_or_else(|| "No description.".to_string());
+    format!("## Description\n\n{}", description.trim_matches('\n'))
+}
 
+/// One list with the issue links, then the remote links, each in Jira's
+/// order, or `None` when the issue has no links.
+fn render_links(issue_links: &[IssueLink], remote_links: &[RemoteLink]) -> String {
+    let items = issue_links
+        .iter()
+        .map(render_issue_link)
+        .chain(remote_links.iter().map(render_remote_link))
+        .collect::<Vec<_>>();
+    let list = if items.is_empty() {
+        "None".to_string()
+    } else {
+        items.join("\n")
+    };
+    format!("## Links\n\n{list}")
+}
+
+fn render_issue_link(link: &IssueLink) -> String {
     format!(
-        "# {key}: {summary}\n\n- Type: {issue_type}\n- Status: {status}\n- Assignee: {assignee}\n- Reporter: {reporter}\n- Created: {created}\n- Labels: {labels}\n- Attachments: {attachment_count}\n\n## Description\n\n{}\n",
-        description.trim_matches('\n')
+        "- {} {}: {} ({})",
+        metadata_or_unknown(link.relation.as_deref()),
+        metadata_or_unknown(link.key.as_deref()),
+        metadata_or_unknown(link.summary.as_deref()),
+        metadata_or_unknown(link.status.as_deref())
     )
+}
+
+/// Shows the URL as an autolink only when it is an absolute `http` or
+/// `https` URL, the rule ADF links follow; otherwise only the title.
+fn render_remote_link(link: &RemoteLink) -> String {
+    let title = metadata_or_unknown(link.title.as_deref());
+    match link.url.as_deref().filter(|url| is_safe_link(url)) {
+        Some(url) => format!("- Remote: {title} <{}>", escape_link_destination(url)),
+        None => format!("- Remote: {title}"),
+    }
+}
+
+fn metadata_or_unknown(value: Option<&str>) -> String {
+    value
+        .and_then(nonempty_metadata)
+        .unwrap_or_else(|| "Unknown".to_string())
 }
 
 fn account_name(account: Option<&Account>, missing: &str) -> String {
@@ -674,6 +732,7 @@ mod tests {
                 created: Some("2026-10-17T02:13:45.123+0200".to_string()),
                 description,
                 attachment: Vec::new(),
+                issue_links: Vec::new(),
             },
         }
     }
@@ -1139,7 +1198,10 @@ mod tests {
 
     #[test]
     fn missing_and_effectively_empty_descriptions_use_the_fallback() {
-        assert!(render_issue(&issue(None)).ends_with("## Description\n\nNo description.\n"));
+        assert!(
+            render_issue(&issue(None), &[])
+                .ends_with("## Description\n\nNo description.\n\n## Links\n\nNone\n")
+        );
 
         let empty_content = [
             json!([{"type": "paragraph", "content": [{"type": "text", "text": " \n\t\u{1b}"}]}]),
@@ -1160,8 +1222,8 @@ mod tests {
             }]}]),
         ];
         for content in empty_content {
-            let output = render_issue(&issue(Some(document(content))));
-            assert!(output.ends_with("## Description\n\nNo description.\n"));
+            let output = render_issue(&issue(Some(document(content))), &[]);
+            assert!(output.ends_with("## Description\n\nNo description.\n\n## Links\n\nNone\n"));
         }
     }
 
@@ -1179,7 +1241,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let output = render_issue(&issue);
+        let output = render_issue(&issue, &[]);
 
         assert!(output.contains(
             "- Type: Unknown\n- Status: Open\n- Assignee: Unknown\n- Reporter: Unknown\n- Created: Unknown\n- Labels: None\n- Attachments: 0\n"
@@ -1204,7 +1266,7 @@ mod tests {
         }))
         .unwrap();
 
-        let output = render_issue(&issue);
+        let output = render_issue(&issue, &[]);
 
         assert!(output.contains("- Attachments: 1\n"));
         assert!(!output.contains("private-id"));
@@ -1225,7 +1287,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let output = render_issue(&issue);
+        let output = render_issue(&issue, &[]);
 
         assert!(output.starts_with("# ABC-123 \\# forged: \\*summary\\*\\[31m\n"));
         assert!(output.contains("- Status: \\> Open\n"));
@@ -1248,7 +1310,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let output = render_issue(&issue);
+        let output = render_issue(&issue, &[]);
 
         assert!(output.contains(
             "- Assignee: Unknown\n- Reporter: Unknown\n- Created: Unknown\n- Labels: kept\n- Attachments: 0\n"
@@ -1270,7 +1332,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(render_issue(&issue).contains("- Labels: None\n- Attachments: 0\n"));
+        assert!(render_issue(&issue, &[]).contains("- Labels: None\n- Attachments: 0\n"));
     }
 
     #[test]
@@ -1280,8 +1342,8 @@ mod tests {
         );
 
         assert_eq!(
-            render_issue(&issue(Some(description))),
-            "# ABC-123: Fix the thing\n\n- Type: Bug\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Created: 2026-10-17T02:13:45.123+0200\n- Labels: backend, urgent\n- Attachments: 0\n\n## Description\n\nRendered description.\n"
+            render_issue(&issue(Some(description)), &[]),
+            "# ABC-123: Fix the thing\n\n- Type: Bug\n- Status: In Progress\n- Assignee: Unassigned\n- Reporter: Jane Doe\n- Created: 2026-10-17T02:13:45.123+0200\n- Labels: backend, urgent\n- Attachments: 0\n\n## Description\n\nRendered description.\n\n## Links\n\nNone\n"
         );
     }
 
@@ -1299,8 +1361,8 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(render_issue(&issue).contains("- Type: Unknown\n"));
-        assert!(render_issue(&issue).contains("- Created: Unknown\n"));
+        assert!(render_issue(&issue, &[]).contains("- Type: Unknown\n"));
+        assert!(render_issue(&issue, &[]).contains("- Created: Unknown\n"));
     }
 
     #[test]
@@ -1316,7 +1378,7 @@ mod tests {
             }))
             .unwrap();
 
-            assert!(render_issue(&issue).contains("- Type: Unknown\n"));
+            assert!(render_issue(&issue, &[]).contains("- Type: Unknown\n"));
         }
     }
 
@@ -1331,7 +1393,7 @@ mod tests {
             issue.fields.created = Some(created.to_string());
 
             assert!(
-                render_issue(&issue).contains(&format!("\n- Created: {created}\n")),
+                render_issue(&issue, &[]).contains(&format!("\n- Created: {created}\n")),
                 "{created}"
             );
         }
@@ -1350,7 +1412,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let output = render_issue(&issue);
+        let output = render_issue(&issue, &[]);
 
         assert!(output.contains("- Type: \\[Bug\\]\\(x\\) \\# forged\n"));
         assert!(output.contains("- Created: 2026-10-17 \\*today\\*\\[31m \\# forged\n"));
@@ -1369,10 +1431,156 @@ mod tests {
             }
         }))
         .unwrap();
-        let output = render_issue(&issue);
+        let output = render_issue(&issue, &[]);
 
         assert!(output.contains("ABC-123: Summary \\# forged"));
         assert!(output.contains("- Type: Bug details\n"));
         assert!(!output.contains(['\u{2028}', '\u{2029}']));
+    }
+
+    fn issue_link(relation: &str, key: &str, summary: &str, status: &str) -> IssueLink {
+        IssueLink {
+            relation: Some(relation.to_string()),
+            key: Some(key.to_string()),
+            summary: Some(summary.to_string()),
+            status: Some(status.to_string()),
+        }
+    }
+
+    fn remote_link(title: Option<&str>, url: Option<&str>) -> RemoteLink {
+        RemoteLink {
+            title: title.map(str::to_string),
+            url: url.map(str::to_string),
+        }
+    }
+
+    fn links_section(issue_links: Vec<IssueLink>, remote_links: &[RemoteLink]) -> String {
+        let mut issue = issue(None);
+        issue.fields.issue_links = issue_links;
+        let output = render_issue(&issue, remote_links);
+        let start = output.find("## Links\n\n").unwrap();
+        output[start..].to_string()
+    }
+
+    #[test]
+    fn links_follow_the_description_as_the_last_section() {
+        let mut issue = issue(None);
+        issue.fields.issue_links = vec![issue_link("blocks", "ABC-2", "Other", "Done")];
+
+        assert!(render_issue(&issue, &[]).ends_with(
+            "- Attachments: 0\n\n## Description\n\nNo description.\n\n## Links\n\n- blocks ABC-2: Other (Done)\n"
+        ));
+    }
+
+    #[test]
+    fn renders_outward_and_inward_issue_links_then_remote_links_in_order() {
+        let output = links_section(
+            vec![
+                issue_link("blocks", "ABC-2", "Other", "In Progress"),
+                issue_link("is blocked by", "ABC-3", "Blocker", "Done"),
+            ],
+            &[
+                remote_link(Some("PR 1"), Some("https://github.com/acme/repo/pull/1")),
+                remote_link(Some("Docs"), Some("http://example.com/docs")),
+            ],
+        );
+
+        assert_eq!(
+            output,
+            "## Links\n\n- blocks ABC-2: Other (In Progress)\n- is blocked by ABC-3: Blocker (Done)\n- Remote: PR 1 <https://github.com/acme/repo/pull/1>\n- Remote: Docs <http://example.com/docs>\n"
+        );
+    }
+
+    #[test]
+    fn renders_remote_links_without_issue_links() {
+        let output = links_section(
+            Vec::new(),
+            &[remote_link(Some("PR 1"), Some("https://example.com/1"))],
+        );
+
+        assert_eq!(
+            output,
+            "## Links\n\n- Remote: PR 1 <https://example.com/1>\n"
+        );
+    }
+
+    #[test]
+    fn no_links_render_none() {
+        assert_eq!(links_section(Vec::new(), &[]), "## Links\n\nNone\n");
+    }
+
+    #[test]
+    fn missing_and_empty_link_values_render_unknown() {
+        let missing = IssueLink {
+            relation: None,
+            key: None,
+            summary: None,
+            status: None,
+        };
+        let empty = issue_link("\u{1b}", "", "\r\n", " ");
+
+        let output = links_section(
+            vec![missing, empty],
+            &[remote_link(None, None), remote_link(Some("\u{7}"), None)],
+        );
+
+        assert_eq!(
+            output,
+            "## Links\n\n- Unknown Unknown: Unknown (Unknown)\n- Unknown Unknown: Unknown (Unknown)\n- Remote: Unknown\n- Remote: Unknown\n"
+        );
+    }
+
+    #[test]
+    fn remote_links_show_only_the_title_for_unsafe_urls() {
+        for url in [
+            "javascript:alert(1)",
+            "/relative/path",
+            "ftp://example.com/file",
+            "https:example.com",
+            "https://example.com/\u{1b}[31m",
+            "",
+        ] {
+            let output = links_section(Vec::new(), &[remote_link(Some("Title"), Some(url))]);
+
+            assert_eq!(output, "## Links\n\n- Remote: Title\n", "{url:?}");
+        }
+    }
+
+    #[test]
+    fn remote_link_urls_escape_autolink_delimiters() {
+        let output = links_section(
+            Vec::new(),
+            &[remote_link(
+                Some("Title"),
+                Some("https://example.com/a b<c>d"),
+            )],
+        );
+
+        assert_eq!(
+            output,
+            "## Links\n\n- Remote: Title <https://example.com/a%20b%3Cc%3Ed>\n"
+        );
+    }
+
+    #[test]
+    fn link_values_are_single_line_and_escaped() {
+        let output = links_section(
+            vec![issue_link(
+                "[blocks](x)\n# forged",
+                "ABC-2\u{202e}",
+                "*sum*\u{2028}mary",
+                "> Done",
+            )],
+            &[remote_link(
+                Some("<b>PR</b>\r\n- item"),
+                Some("https://example.com/"),
+            )],
+        );
+
+        assert_eq!(
+            output,
+            "## Links\n\n- \\[blocks\\]\\(x\\) \\# forged ABC-2: \\*sum\\* mary (\\> Done)\n- Remote: \\<b\\>PR\\</b\\>  - item <https://example.com/>\n"
+        );
+        assert!(!output.contains(['\u{1b}', '\u{202e}', '\u{2028}']));
     }
 }
