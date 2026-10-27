@@ -771,11 +771,11 @@
 
 ## Comments
 
+Showing the first &lt;shown&gt; of &lt;total&gt; comments.
+
 ### &lt;author&gt; · &lt;created&gt;
 
-&lt;comment body rendered as Markdown, or No content.&gt;
-
-Showing the first &lt;shown&gt; of &lt;total&gt; comments.</code></pre>
+&lt;comment body rendered as Markdown, or No content.&gt;</code></pre>
 
   <p><code>## Links</code> is always shown. It lists the issue links, then the remote links,
   each in Jira's order, or says <code>None</code> when there are none. An issue link's
@@ -793,7 +793,8 @@ Showing the first &lt;shown&gt; of &lt;total&gt; comments.</code></pre>
   Headings in a comment body move three levels down, to at most level 6, so they
   nest under the comment's <code>###</code> line and cannot pose as a section. The
   <code>Showing the first ...</code> line appears only when Jira's <code>total</code> is higher than the
-  number of comments shown, for example past 1000 comments.</p>
+  number of comments shown, for example past 1000 comments. It comes directly under
+  the heading, where no comment body can imitate it.</p>
 
   <p>Metadata, link values, comment authors and comment timestamps are reduced to
   one line, have control and bidirectional formatting characters removed and have
