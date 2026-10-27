@@ -256,7 +256,8 @@
       <tbody>
         <tr><td><code>jcli issue read &lt;KEY&gt;</code></td><td>The issue as Markdown</td></tr>
         <tr><td><code>jcli issue search --jql &lt;JQL&gt; --json [--limit N]</code></td><td>The first page of matching issues as JSON</td></tr>
-        <tr><td><code>jcli issue attachments &lt;KEY&gt; [--out DIR]</code></td><td>A Markdown list of the downloaded files</td></tr>
+        <tr><td><code>jcli issue attachments list &lt;KEY&gt; --json</code></td><td>The issue's attachment metadata as JSON</td></tr>
+        <tr><td><code>jcli issue attachments download &lt;KEY&gt; [--out DIR]</code></td><td>A Markdown list of the downloaded files</td></tr>
         <tr><td><code>jcli xray test-runs &lt;KEY&gt; --json [--status S]... [--sort started-on] [--direction asc|desc]</code></td><td>The first page of the test issue's test runs as JSON</td></tr>
         <tr><td><code>jcli whoami</code></td><td>The account the credentials belong to, on one line</td></tr>
       </tbody>
@@ -320,7 +321,8 @@
             <text class="m" x="820" y="371" text-anchor="middle">Xray Cloud</text>
             <text class="d" x="820" y="389" text-anchor="middle">API v2</text></g>
           <g class="n-jira"><rect x="200" y="440" width="260" height="50" rx="6"/>
-            <text class="m" x="330" y="470" text-anchor="middle">adf, issue_search, attachments</text></g>
+            <text class="m" x="330" y="461" text-anchor="middle">adf, issue_search,</text>
+            <text class="m" x="330" y="479" text-anchor="middle">attachment_list, attachments</text></g>
           <g class="n-xray"><rect x="470" y="440" width="240" height="50" rx="6"/>
             <text class="m" x="590" y="461" text-anchor="middle">xray/test_runs.rs</text>
             <text class="d" x="590" y="479" text-anchor="middle">sort and JSON output</text></g>
@@ -349,9 +351,9 @@
         <li><code>src/config.rs</code> to <code>src/xray/client.rs</code> (Xray client)</li>
         <li><code>src/jira/client.rs</code> to Jira Cloud REST API v3</li>
         <li><code>src/xray/client.rs</code> to Xray Cloud API v2</li>
-        <li><code>src/jira/client.rs</code> to adf, issue_search, attachments</li>
+        <li><code>src/jira/client.rs</code> to adf, issue_search, attachment_list, attachments</li>
         <li><code>src/xray/client.rs</code> to <code>xray/test_runs.rs</code> (sort and JSON output)</li>
-        <li>adf, issue_search, attachments to stdout: Markdown or JSON, exit 0</li>
+        <li>adf, issue_search, attachment_list, attachments to stdout: Markdown or JSON, exit 0</li>
         <li><code>xray/test_runs.rs</code> to stdout</li>
         <li><code>src/commands.rs</code>, on any failure, to stderr: one error line, exit 1 to 4</li>
       </ul>
@@ -393,8 +395,9 @@
   </div>
 
   <p><code>xray test-runs</code> resolves the issue key to Jira's numeric issue ID with one Jira
-  request, then calls Xray. <code>issue attachments</code> checks for Unix before it loads the
-  configuration and exits 4 on other platforms.</p>
+  request, then calls Xray. <code>issue attachments download</code> checks for Unix before it
+  loads the configuration and exits 4 on other platforms. <code>issue attachments list</code>
+  runs on every platform.</p>
 </section>
 
 <section id="modules-and-dependencies" aria-labelledby="modules-and-dependencies-h">
@@ -426,6 +429,8 @@
     (<a href="adr/0008-hand-rolled-adf-to-markdown-renderer.md">ADR 0008</a>).</li>
     <li><a href="../src/issue_search.rs"><code>src/issue_search.rs</code></a>: maps a Jira search page to the <code>IssueSearchOutput</code> JSON
     contract.</li>
+    <li><a href="../src/attachment_list.rs"><code>src/attachment_list.rs</code></a>: maps attachment metadata to the
+    <code>AttachmentListOutput</code> JSON contract.</li>
     <li><a href="../src/attachments.rs"><code>src/attachments.rs</code></a>: plans and checks attachment
     downloads, builds safe file names, and streams and writes each file
     (<a href="adr/0009-attachment-downloads.md">ADR 0009</a>).</li>
@@ -435,7 +440,7 @@
 
   <p>There is no separate domain model between the Jira response and the output. The
   serde models in <code>src/jira/</code> and <code>src/xray/</code> hold only the requested fields, and
-  <code>adf</code>, <code>issue_search</code> and <code>xray::test_runs</code> turn them straight into the output
+  <code>adf</code>, <code>issue_search</code>, <code>attachment_list</code> and <code>xray::test_runs</code> turn them straight into the output
   contract. That translation is where Jira and Xray shapes end.</p>
 
   <p>Arrows show the imports that exist between modules.</p>
@@ -444,7 +449,7 @@
     <div class="diagram">
       <svg viewBox="0 0 1000 420" role="img" aria-labelledby="deps-title deps-desc">
         <title id="deps-title">Imports between jcli modules</title>
-        <desc id="deps-desc">main imports commands and xray::test_runs. commands imports issue_key, config, jira::client, xray::client, adf, attachments, issue_search, xray::test_runs and output. adf imports jira::issue. jira::issue imports jira::attachment. attachments imports jira::client, jira::attachment and issue_key. issue_search imports jira::search and output. jira::client imports config, issue_key, jira::issue, jira::attachment, jira::search and output. xray::client imports config and xray::test_runs. xray::test_runs imports output.</desc>
+        <desc id="deps-desc">main imports commands and xray::test_runs. commands imports issue_key, config, jira::client, xray::client, adf, attachments, attachment_list, issue_search, xray::test_runs and output. attachment_list imports jira::attachment, issue_key and output. adf imports jira::issue. jira::issue imports jira::attachment. attachments imports jira::client, jira::attachment and issue_key. issue_search imports jira::search and output. jira::client imports config, issue_key, jira::issue, jira::attachment, jira::search and output. xray::client imports config and xray::test_runs. xray::test_runs imports output.</desc>
         <defs>
           <marker id="da-ink" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="h-ink" d="M0,0 L10,5 L0,10 z"/></marker>
           <marker id="da-muted" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="h-muted" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -460,12 +465,16 @@
           <path class="e e-ink" marker-end="url(#da-ink)" d="M570,118 C940,118 975,140 975,220 V370"/>
           <path class="e e-ink" marker-end="url(#da-ink)" d="M480,136 L200,280"/>
           <path class="e e-ink" marker-end="url(#da-ink)" d="M560,136 L800,190"/>
-          <path class="e e-ink" marker-end="url(#da-ink)" d="M490,136 L410,280"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M440,136 L390,280"/>
           <path class="e e-ink" marker-end="url(#da-ink)" d="M450,136 L240,190"/>
-          <path class="e e-ink" marker-end="url(#da-ink)" d="M510,136 L610,280"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M565,136 L640,280"/>
           <path class="e e-ink" marker-end="url(#da-ink)" d="M540,136 L820,280"/>
           <path class="e e-ink" marker-end="url(#da-ink)" d="M520,136 L715,292 Q725,300 730,315 L748,370"/>
-          <!-- adf, attachments, issue_search -->
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M500,136 V190"/>
+          <!-- adf, attachments, attachment_list, issue_search -->
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M430,216 C330,225 315,240 315,280 V360 L305,370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M445,226 C440,248 420,252 400,252 H120 C112,252 110,260 110,270 V370"/>
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M570,214 C650,225 705,240 705,270 V360 L712,370"/>
           <path class="e e-jira" marker-end="url(#da-jira)" d="M405,316 L413,370"/>
           <path class="e e-jira" marker-end="url(#da-jira)" d="M200,226 V280"/>
           <path class="e e-jira" marker-end="url(#da-jira)" d="M250,226 C300,240 300,255 300,290 V340 C300,355 285,362 270,370"/>
@@ -489,6 +498,7 @@
           <g class="n-core"><rect x="430" y="20" width="140" height="36" rx="6"/><text class="m" x="500" y="43" text-anchor="middle">main</text></g>
           <g class="n-core"><rect x="430" y="100" width="140" height="36" rx="6"/><text class="m" x="500" y="123" text-anchor="middle">commands</text></g>
           <g class="n-jira"><rect x="130" y="190" width="140" height="36" rx="6"/><text class="m" x="200" y="213" text-anchor="middle">attachments</text></g>
+          <g class="n-jira"><rect x="430" y="190" width="140" height="36" rx="6"/><text class="m" x="500" y="213" text-anchor="middle">attachment_list</text></g>
           <g class="n-xray"><rect x="760" y="190" width="140" height="36" rx="6"/><text class="m" x="830" y="213" text-anchor="middle">xray::client</text></g>
           <g class="n-jira"><rect x="130" y="280" width="140" height="36" rx="6"/><text class="m" x="200" y="303" text-anchor="middle">jira::client</text></g>
           <g class="n-jira"><rect x="330" y="280" width="140" height="36" rx="6"/><text class="m" x="400" y="303" text-anchor="middle">adf</text></g>
@@ -513,10 +523,11 @@
       <summary>Imports as a list</summary>
       <ul>
         <li><code>main</code> imports <code>commands</code>, <code>xray::test_runs</code></li>
-        <li><code>commands</code> imports <code>issue_key</code>, <code>config</code>, <code>jira::client</code>, <code>xray::client</code>, <code>adf</code>, <code>attachments</code>, <code>issue_search</code>, <code>xray::test_runs</code>, <code>output</code></li>
+        <li><code>commands</code> imports <code>issue_key</code>, <code>config</code>, <code>jira::client</code>, <code>xray::client</code>, <code>adf</code>, <code>attachments</code>, <code>attachment_list</code>, <code>issue_search</code>, <code>xray::test_runs</code>, <code>output</code></li>
         <li><code>adf</code> imports <code>jira::issue</code></li>
         <li><code>jira::issue</code> imports <code>jira::attachment</code></li>
         <li><code>attachments</code> imports <code>jira::client</code>, <code>jira::attachment</code>, <code>issue_key</code></li>
+        <li><code>attachment_list</code> imports <code>jira::attachment</code>, <code>issue_key</code>, <code>output</code></li>
         <li><code>issue_search</code> imports <code>jira::search</code>, <code>output</code></li>
         <li><code>jira::client</code> imports <code>config</code>, <code>issue_key</code>, <code>jira::issue</code>, <code>jira::attachment</code>, <code>jira::search</code>, <code>output</code></li>
         <li><code>xray::client</code> imports <code>config</code>, <code>xray::test_runs</code></li>
@@ -609,7 +620,8 @@
         <tr><td><code>whoami</code></td><td><code>GET rest/api/3/myself</code></td></tr>
         <tr><td><code>issue read</code></td><td><code>GET rest/api/3/issue/{key}?fields=summary,issuetype,status,assignee,reporter,labels,created,description,attachment</code></td></tr>
         <tr><td><code>issue search</code></td><td><code>GET rest/api/3/search/jql?jql=...&amp;maxResults=N&amp;fields=summary,status,issuetype,created,updated,labels</code></td></tr>
-        <tr><td><code>issue attachments</code></td><td><code>GET rest/api/3/issue/{key}?fields=attachment</code>, then <code>GET rest/api/3/attachment/content/{id}?redirect=false</code> per attachment</td></tr>
+        <tr><td><code>issue attachments list</code></td><td><code>GET rest/api/3/issue/{key}?fields=attachment</code></td></tr>
+        <tr><td><code>issue attachments download</code></td><td><code>GET rest/api/3/issue/{key}?fields=attachment</code>, then <code>GET rest/api/3/attachment/content/{id}?redirect=false</code> per attachment</td></tr>
         <tr><td><code>xray test-runs</code></td><td><code>GET rest/api/3/issue/{key}?fields=summary</code> for the numeric issue ID</td></tr>
       </tbody>
     </table>
@@ -699,10 +711,17 @@
   is given. Runs with a missing or unparseable <code>startedOn</code> come after dated runs,
   and null entries come last. Ties break by run ID, then by original position.</p>
 
-  <p>Both JSON outputs escape DEL, the C1 control range and bidirectional formatting
+  <p><code>issue attachments list</code> prints pretty JSON with <code>issue</code>, <code>returned</code> and
+  <code>attachments</code> (<a href="adr/0010-list-and-select-attachments.md">ADR 0010</a>). Each
+  attachment has <code>id</code>, <code>filename</code>, <code>size</code>, <code>created</code> and <code>mimeType</code>, in Jira's
+  order. <code>filename</code> is Jira's name, not the sanitized name <code>download</code> writes.
+  Missing <code>created</code> and <code>mimeType</code> values are null. An issue without attachments
+  exits 0 with <code>"attachments": []</code>.</p>
+
+  <p>All JSON outputs escape DEL, the C1 control range and bidirectional formatting
   characters as <code>\uXXXX</code>, so parsing the JSON returns the original text.</p>
 
-  <p><code>issue attachments</code> prints <code># &lt;KEY&gt; attachments</code> followed by one <code>- &lt;file name&gt;</code>
+  <p><code>issue attachments download</code> prints <code># &lt;KEY&gt; attachments</code> followed by one <code>- &lt;file name&gt;</code>
   line per downloaded file, or <code>No attachments.</code> In the second case it creates no
   directory.</p>
 
@@ -712,7 +731,7 @@
 
 <section id="attachment-downloads" aria-labelledby="attachment-downloads-h">
   <h2 id="attachment-downloads-h">Attachment downloads</h2>
-  <p><code>issue attachments</code> writes into <code>./&lt;KEY&gt;/</code>, or into the directory given with
+  <p><code>issue attachments download</code> writes into <code>./&lt;KEY&gt;/</code>, or into the directory given with
   <code>--out</code>, which jcli uses as is. It plans every download before the first download
   and rejects the whole set when:</p>
   <ul>
