@@ -71,6 +71,7 @@ pub(crate) fn xray_test_runs(
     sort: Option<TestRunSortField>,
     direction: Option<TestRunSortDirection>,
     details: bool,
+    limit: u32,
 ) -> ! {
     let issue_key = parse_issue_key(value);
     // Both configuration sets are loaded before any request so a missing
@@ -91,10 +92,14 @@ pub(crate) fn xray_test_runs(
     } else {
         Some(statuses.as_slice())
     };
-    let mut page = or_exit(xray_client.test_runs(kind, &issue.id, statuses, details), 3);
+    let mut page = or_exit(
+        xray_client.test_runs(kind, &issue.id, statuses, details, limit as usize),
+        3,
+    );
     if let Some(field) = sort {
         // A sort without an explicit direction defaults to desc. Sorting
-        // applies only to the returned page, never to the full history.
+        // applies to the runs of all fetched pages, never to the full
+        // history.
         let direction = direction.unwrap_or(TestRunSortDirection::Desc);
         sort_page(&mut page, field, direction);
     }
