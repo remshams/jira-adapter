@@ -232,6 +232,7 @@
       </ol>
     </li>
     <li><a href="#output">Output</a></li>
+    <li><a href="#attachment-selection">Attachment selection</a></li>
     <li><a href="#attachment-downloads">Attachment downloads</a></li>
     <li><a href="#credentials">Credentials</a></li>
     <li><a href="#tests-and-quality-gates">Tests and quality gates</a></li>
@@ -256,8 +257,8 @@
       <tbody>
         <tr><td><code>jcli issue read &lt;KEY&gt;</code></td><td>The issue as Markdown</td></tr>
         <tr><td><code>jcli issue search --jql &lt;JQL&gt; --json [--limit N]</code></td><td>The first page of matching issues as JSON</td></tr>
-        <tr><td><code>jcli issue attachments list &lt;KEY&gt; --json</code></td><td>The issue's attachment metadata as JSON</td></tr>
-        <tr><td><code>jcli issue attachments download &lt;KEY&gt; [--out DIR]</code></td><td>A Markdown list of the downloaded files</td></tr>
+        <tr><td><code>jcli issue attachments list &lt;KEY&gt; --json [--name GLOB]... [--id ID]...</code></td><td>The issue's attachment metadata as JSON</td></tr>
+        <tr><td><code>jcli issue attachments download &lt;KEY&gt; [--out DIR] [--name GLOB]... [--id ID]...</code></td><td>A Markdown list of the downloaded files</td></tr>
         <tr><td><code>jcli xray test-runs &lt;KEY&gt; --json [--status S]... [--sort started-on] [--direction asc|desc]</code></td><td>The first page of the test issue's test runs as JSON</td></tr>
         <tr><td><code>jcli whoami</code></td><td>The account the credentials belong to, on one line</td></tr>
       </tbody>
@@ -362,8 +363,8 @@
 
   <p><a href="../src/main.rs"><code>src/main.rs</code></a> declares the commands with clap's derive API and hands each one to a
   function in <a href="../src/commands.rs"><code>src/commands.rs</code></a>. Clap rejects unknown commands, missing required
-  flags and out-of-range values such as <code>--limit 0</code> before jcli reads any
-  configuration, and exits with code 2.</p>
+  flags, out-of-range values such as <code>--limit 0</code> and invalid <code>--name</code> globs before
+  jcli reads any configuration, and exits with code 2.</p>
 
   <p>Each <code>pub(crate)</code> function in <code>src/commands.rs</code> is the application service for one
   command. It runs the same steps in order:</p>
@@ -431,6 +432,9 @@
     contract.</li>
     <li><a href="../src/attachment_list.rs"><code>src/attachment_list.rs</code></a>: maps attachment metadata to the
     <code>AttachmentListOutput</code> JSON contract.</li>
+    <li><a href="../src/attachment_selection.rs"><code>src/attachment_selection.rs</code></a>: <code>AttachmentSelection</code>, a value object holding
+    the <code>--name</code> globs and <code>--id</code> values. Its <code>select</code> method is the domain logic
+    that picks the attachments <code>list</code> and <code>download</code> work on.</li>
     <li><a href="../src/attachments.rs"><code>src/attachments.rs</code></a>: plans and checks attachment
     downloads, builds safe file names, and streams and writes each file
     (<a href="adr/0009-attachment-downloads.md">ADR 0009</a>).</li>
@@ -447,9 +451,9 @@
 
   <figure>
     <div class="diagram">
-      <svg viewBox="0 0 1000 420" role="img" aria-labelledby="deps-title deps-desc">
+      <svg viewBox="-200 0 1200 440" role="img" aria-labelledby="deps-title deps-desc">
         <title id="deps-title">Imports between jcli modules</title>
-        <desc id="deps-desc">main imports commands and xray::test_runs. commands imports issue_key, config, jira::client, xray::client, adf, attachments, attachment_list, issue_search, xray::test_runs and output. attachment_list imports jira::attachment, issue_key and output. adf imports jira::issue. jira::issue imports jira::attachment. attachments imports jira::client, jira::attachment and issue_key. issue_search imports jira::search and output. jira::client imports config, issue_key, jira::issue, jira::attachment, jira::search and output. xray::client imports config and xray::test_runs. xray::test_runs imports output.</desc>
+        <desc id="deps-desc">main imports commands, xray::test_runs and attachment_selection. commands imports issue_key, config, jira::client, xray::client, adf, attachments, attachment_list, attachment_selection, issue_search, xray::test_runs and output. attachment_list imports jira::attachment, issue_key and output. attachment_selection imports jira::attachment. adf imports jira::issue. jira::issue imports jira::attachment. attachments imports jira::client, jira::attachment and issue_key. issue_search imports jira::search and output. jira::client imports config, issue_key, jira::issue, jira::attachment, jira::search and output. xray::client imports config and xray::test_runs. xray::test_runs imports output.</desc>
         <defs>
           <marker id="da-ink" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="h-ink" d="M0,0 L10,5 L0,10 z"/></marker>
           <marker id="da-muted" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="h-muted" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -460,6 +464,7 @@
           <!-- main -->
           <path class="e e-ink" marker-end="url(#da-ink)" d="M500,56 V100"/>
           <path class="e e-ink" marker-end="url(#da-ink)" d="M570,38 C700,38 720,60 720,110 V240 C720,262 760,270 790,280"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M430,30 H-80 Q-100,30 -100,50 V280"/>
           <!-- commands -->
           <path class="e e-ink" marker-end="url(#da-ink)" d="M430,118 C120,118 60,150 60,230 V370"/>
           <path class="e e-ink" marker-end="url(#da-ink)" d="M570,118 C940,118 975,140 975,220 V370"/>
@@ -471,6 +476,9 @@
           <path class="e e-ink" marker-end="url(#da-ink)" d="M540,136 L820,280"/>
           <path class="e e-ink" marker-end="url(#da-ink)" d="M520,136 L715,292 Q725,300 730,315 L748,370"/>
           <path class="e e-ink" marker-end="url(#da-ink)" d="M500,136 V190"/>
+          <path class="e e-ink" marker-end="url(#da-ink)" d="M430,128 C200,128 -60,150 -80,280"/>
+          <!-- attachment_selection -->
+          <path class="e e-jira" marker-end="url(#da-jira)" d="M-100,316 V425 H250 V406"/>
           <!-- adf, attachments, attachment_list, issue_search -->
           <path class="e e-jira" marker-end="url(#da-jira)" d="M430,216 C330,225 315,240 315,280 V360 L305,370"/>
           <path class="e e-jira" marker-end="url(#da-jira)" d="M445,226 C440,248 420,252 400,252 H120 C112,252 110,260 110,270 V370"/>
@@ -500,6 +508,7 @@
           <g class="n-jira"><rect x="130" y="190" width="140" height="36" rx="6"/><text class="m" x="200" y="213" text-anchor="middle">attachments</text></g>
           <g class="n-jira"><rect x="430" y="190" width="140" height="36" rx="6"/><text class="m" x="500" y="213" text-anchor="middle">attachment_list</text></g>
           <g class="n-xray"><rect x="760" y="190" width="140" height="36" rx="6"/><text class="m" x="830" y="213" text-anchor="middle">xray::client</text></g>
+          <g class="n-jira"><rect x="-185" y="280" width="170" height="36" rx="6"/><text class="m" x="-100" y="303" text-anchor="middle">attachment_selection</text></g>
           <g class="n-jira"><rect x="130" y="280" width="140" height="36" rx="6"/><text class="m" x="200" y="303" text-anchor="middle">jira::client</text></g>
           <g class="n-jira"><rect x="330" y="280" width="140" height="36" rx="6"/><text class="m" x="400" y="303" text-anchor="middle">adf</text></g>
           <g class="n-jira"><rect x="550" y="280" width="140" height="36" rx="6"/><text class="m" x="620" y="303" text-anchor="middle">issue_search</text></g>
@@ -522,12 +531,13 @@
     <details>
       <summary>Imports as a list</summary>
       <ul>
-        <li><code>main</code> imports <code>commands</code>, <code>xray::test_runs</code></li>
-        <li><code>commands</code> imports <code>issue_key</code>, <code>config</code>, <code>jira::client</code>, <code>xray::client</code>, <code>adf</code>, <code>attachments</code>, <code>attachment_list</code>, <code>issue_search</code>, <code>xray::test_runs</code>, <code>output</code></li>
+        <li><code>main</code> imports <code>commands</code>, <code>xray::test_runs</code>, <code>attachment_selection</code></li>
+        <li><code>commands</code> imports <code>issue_key</code>, <code>config</code>, <code>jira::client</code>, <code>xray::client</code>, <code>adf</code>, <code>attachments</code>, <code>attachment_list</code>, <code>attachment_selection</code>, <code>issue_search</code>, <code>xray::test_runs</code>, <code>output</code></li>
         <li><code>adf</code> imports <code>jira::issue</code></li>
         <li><code>jira::issue</code> imports <code>jira::attachment</code></li>
         <li><code>attachments</code> imports <code>jira::client</code>, <code>jira::attachment</code>, <code>issue_key</code></li>
         <li><code>attachment_list</code> imports <code>jira::attachment</code>, <code>issue_key</code>, <code>output</code></li>
+        <li><code>attachment_selection</code> imports <code>jira::attachment</code></li>
         <li><code>issue_search</code> imports <code>jira::search</code>, <code>output</code></li>
         <li><code>jira::client</code> imports <code>config</code>, <code>issue_key</code>, <code>jira::issue</code>, <code>jira::attachment</code>, <code>jira::search</code>, <code>output</code></li>
         <li><code>xray::client</code> imports <code>config</code>, <code>xray::test_runs</code></li>
@@ -715,29 +725,40 @@
   <code>attachments</code> (<a href="adr/0010-list-and-select-attachments.md">ADR 0010</a>). Each
   attachment has <code>id</code>, <code>filename</code>, <code>size</code>, <code>created</code> and <code>mimeType</code>, in Jira's
   order. <code>filename</code> is Jira's name, not the sanitized name <code>download</code> writes.
-  Missing <code>created</code> and <code>mimeType</code> values are null. An issue without attachments
-  exits 0 with <code>"attachments": []</code>.</p>
+  Missing <code>created</code> and <code>mimeType</code> values are null. An issue without attachments,
+  or filters that match none, exits 0 with <code>"attachments": []</code>.</p>
 
   <p>All JSON outputs escape DEL, the C1 control range and bidirectional formatting
   characters as <code>\uXXXX</code>, so parsing the JSON returns the original text.</p>
 
   <p><code>issue attachments download</code> prints <code># &lt;KEY&gt; attachments</code> followed by one <code>- &lt;file name&gt;</code>
-  line per downloaded file, or <code>No attachments.</code> In the second case it creates no
-  directory.</p>
+  line per downloaded file, or <code>No attachments.</code> when the issue has no attachments
+  or the filters match none. In the second case it creates no directory.</p>
 
   <p><code>whoami</code> prints <code>&lt;display name&gt; &lt;&lt;email&gt;&gt; (&lt;account ID&gt;)</code> with placeholders for
   missing values.</p>
 </section>
 
+<section id="attachment-selection" aria-labelledby="attachment-selection-h">
+  <h2 id="attachment-selection-h">Attachment selection</h2>
+  <p><code>list</code> and <code>download</code> accept <code>--name &lt;GLOB&gt;</code> and <code>--id &lt;ID&gt;</code>, each repeatable
+  (<a href="adr/0010-list-and-select-attachments.md">ADR 0010</a>). An attachment is selected
+  when its ID equals any <code>--id</code> or its filename matches any <code>--name</code>; without
+  filters every attachment is selected, in Jira's order. <code>--name</code> matches Jira's
+  original filename, not the sanitized file name on disk, and is case-sensitive.
+  The <code>globset</code> crate parses and matches the globs. clap parses them, so an invalid
+  glob exits 2 before jcli loads configuration.</p>
+</section>
+
 <section id="attachment-downloads" aria-labelledby="attachment-downloads-h">
   <h2 id="attachment-downloads-h">Attachment downloads</h2>
   <p><code>issue attachments download</code> writes into <code>./&lt;KEY&gt;/</code>, or into the directory given with
-  <code>--out</code>, which jcli uses as is. It plans every download before the first download
-  and rejects the whole set when:</p>
+  <code>--out</code>, which jcli uses as is. It plans every selected download before the first
+  download and rejects the whole selection when:</p>
   <ul>
     <li>an attachment ID is empty, longer than 256 bytes, <code>.</code> or <code>..</code>, or repeated,</li>
     <li>a size is negative or larger than 20 GiB,</li>
-    <li>the set has more than 1,000 attachments or more than 100 GiB in total,</li>
+    <li>the selection has more than 1,000 attachments or more than 100 GiB in total,</li>
     <li>two generated file names are equal when compared case-insensitively.</li>
   </ul>
 

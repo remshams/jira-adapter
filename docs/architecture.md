@@ -12,8 +12,8 @@ without an async runtime ([ADR 0002](adr/0002-build-jcli-as-a-single-rust-binary
 | --- | --- |
 | `jcli issue read <KEY>` | The issue as Markdown |
 | `jcli issue search --jql <JQL> --json [--limit N]` | The first page of matching issues as JSON |
-| `jcli issue attachments list <KEY> --json` | The issue's attachment metadata as JSON |
-| `jcli issue attachments download <KEY> [--out DIR]` | A Markdown list of the downloaded files |
+| `jcli issue attachments list <KEY> --json [--name GLOB]... [--id ID]...` | The issue's attachment metadata as JSON |
+| `jcli issue attachments download <KEY> [--out DIR] [--name GLOB]... [--id ID]...` | A Markdown list of the downloaded files |
 | `jcli xray test-runs <KEY> --json [--status S]... [--sort started-on] [--direction asc\|desc]` | The first page of the test issue's test runs as JSON |
 | `jcli whoami` | The account the credentials belong to, on one line |
 
@@ -41,8 +41,8 @@ flowchart TD
 
 `src/main.rs` declares the commands with clap's derive API and hands each one to a
 function in `src/commands.rs`. Clap rejects unknown commands, missing required
-flags and out-of-range values such as `--limit 0` before jcli reads any
-configuration, and exits with code 2.
+flags, out-of-range values such as `--limit 0` and invalid `--name` globs before
+jcli reads any configuration, and exits with code 2.
 
 Each `pub(crate)` function in `src/commands.rs` is the application service for one
 command. It runs the same steps in order:
@@ -102,6 +102,9 @@ agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
   contract.
 - `src/attachment_list.rs`: maps attachment metadata to the
   `AttachmentListOutput` JSON contract.
+- `src/attachment_selection.rs`: `AttachmentSelection`, a value object holding
+  the `--name` globs and `--id` values. Its `select` method is the domain logic
+  that picks the attachments `list` and `download` work on.
 - `src/attachments.rs`: plans and checks attachment downloads, builds safe file
   names, and streams and writes each file
   ([ADR 0009](adr/0009-attachment-downloads.md)).
@@ -119,6 +122,7 @@ Arrows show the imports that exist between modules.
 flowchart TD
     Main[main] --> Commands[commands]
     Main --> TestRuns[xray::test_runs]
+    Main --> AttachmentSelection[attachment_selection]
     Commands --> IssueKey[issue_key]
     Commands --> Config[config]
     Commands --> JiraClient[jira::client]
@@ -126,6 +130,7 @@ flowchart TD
     Commands --> Adf[adf]
     Commands --> Attachments[attachments]
     Commands --> AttachmentList[attachment_list]
+    Commands --> AttachmentSelection
     Commands --> IssueSearch[issue_search]
     Commands --> TestRuns
     Commands --> Output[output]
@@ -135,6 +140,7 @@ flowchart TD
     Attachments --> IssueKey
     IssueSearch --> JiraSearch[jira::search]
     AttachmentList --> JiraAttachment
+    AttachmentSelection --> JiraAttachment
     AttachmentList --> IssueKey
     AttachmentList --> Output
     IssueSearch --> Output
@@ -316,28 +322,38 @@ and null entries come last. Ties break by run ID, then by original position.
 `attachments` ([ADR 0010](adr/0010-list-and-select-attachments.md)). Each
 attachment has `id`, `filename`, `size`, `created` and `mimeType`, in Jira's
 order. `filename` is Jira's name, not the sanitized name `download` writes.
-Missing `created` and `mimeType` values are null. An issue without attachments
-exits 0 with `"attachments": []`.
+Missing `created` and `mimeType` values are null. An issue without attachments,
+or filters that match none, exits 0 with `"attachments": []`.
 
 All JSON outputs escape DEL, the C1 control range and bidirectional formatting
 characters as `\uXXXX`, so parsing the JSON returns the original text.
 
 `issue attachments download` prints `# <KEY> attachments` followed by one `- <file name>`
-line per downloaded file, or `No attachments.` In the second case it creates no
-directory.
+line per downloaded file, or `No attachments.` when the issue has no attachments
+or the filters match none. In the second case it creates no directory.
 
 `whoami` prints `<display name> <<email>> (<account ID>)` with placeholders for
 missing values.
 
+## Attachment selection
+
+`list` and `download` accept `--name <GLOB>` and `--id <ID>`, each repeatable
+([ADR 0010](adr/0010-list-and-select-attachments.md)). An attachment is selected
+when its ID equals any `--id` or its filename matches any `--name`; without
+filters every attachment is selected, in Jira's order. `--name` matches Jira's
+original filename, not the sanitized file name on disk, and is case-sensitive.
+The `globset` crate parses and matches the globs. clap parses them, so an invalid
+glob exits 2 before jcli loads configuration.
+
 ## Attachment downloads
 
 `issue attachments download` writes into `./<KEY>/`, or into the directory given with
-`--out`, which jcli uses as is. It plans every download before the first download
-and rejects the whole set when:
+`--out`, which jcli uses as is. It plans every selected download before the first
+download and rejects the whole selection when:
 
 - an attachment ID is empty, longer than 256 bytes, `.` or `..`, or repeated,
 - a size is negative or larger than 20 GiB,
-- the set has more than 1,000 attachments or more than 100 GiB in total,
+- the selection has more than 1,000 attachments or more than 100 GiB in total,
 - two generated file names are equal when compared case-insensitively.
 
 A file name is `<id>-<filename>`, at most 240 bytes. A numeric ID of up to 48
