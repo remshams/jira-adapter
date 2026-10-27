@@ -10,7 +10,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::config::{SanitizedUrl, XrayConfig};
-use crate::xray::test_runs::{GetTestRunsResponse, TestRunPage};
+use crate::xray::test_runs::{GetTestRunsResponse, TestRunPage, XrayIssueKind};
 
 const USER_AGENT: &str = concat!("jcli/", env!("CARGO_PKG_VERSION"));
 const AUTHENTICATE_SEGMENTS: &[&str] = &["api", "v2", "authenticate"];
@@ -27,7 +27,8 @@ const MAX_GRAPHQL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const PAGE_LIMIT: i64 = 100;
 const PAGE_START: i64 = 0;
 
-const GET_TEST_RUNS_QUERY: &str = "query GetTestRuns($testIssueIds: [String], $statuses: [String], $limit: Int!, $start: Int) {\
+/// Runs of one Test issue, across all Test Executions.
+const GET_TEST_RUNS_FOR_TEST_QUERY: &str = "query GetTestRuns($testIssueIds: [String], $statuses: [String], $limit: Int!, $start: Int) {\
     \n  getTestRuns(testIssueIds: $testIssueIds, statuses: $statuses, limit: $limit, start: $start) {\
     \n    total\
     \n    start\
@@ -41,6 +42,33 @@ const GET_TEST_RUNS_QUERY: &str = "query GetTestRuns($testIssueIds: [String], $s
     \n    }\
     \n  }\
     \n}";
+
+/// Runs contained in one Test Execution issue. Same selection set and page
+/// shape as the Test query; only the filter argument differs.
+const GET_TEST_RUNS_FOR_TEST_EXECUTION_QUERY: &str = "query GetTestRuns($testExecIssueIds: [String], $statuses: [String], $limit: Int!, $start: Int) {\
+    \n  getTestRuns(testExecIssueIds: $testExecIssueIds, statuses: $statuses, limit: $limit, start: $start) {\
+    \n    total\
+    \n    start\
+    \n    limit\
+    \n    results {\
+    \n      id\
+    \n      status { name }\
+    \n      startedOn\
+    \n      finishedOn\
+    \n      testExecution { issueId }\
+    \n    }\
+    \n  }\
+    \n}";
+
+/// The query text and the name of its issue ID filter variable for a kind.
+fn query_for(kind: XrayIssueKind) -> (&'static str, &'static str) {
+    match kind {
+        XrayIssueKind::Test => (GET_TEST_RUNS_FOR_TEST_QUERY, "testIssueIds"),
+        XrayIssueKind::TestExecution => {
+            (GET_TEST_RUNS_FOR_TEST_EXECUTION_QUERY, "testExecIssueIds")
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum XrayClientError {
@@ -137,17 +165,19 @@ impl XrayClient {
         })
     }
 
-    /// Returns the first fixed page of test runs for a test issue's numeric
-    /// ID. Resolves its own bearer token; the token stays local to this
-    /// call and is dropped afterwards. `statuses` filters server-side when
-    /// given and is sent as a GraphQL variable, never as query text.
+    /// Returns the first fixed page of test runs for a Test or Test
+    /// Execution issue's numeric ID; `kind` picks the matching filter.
+    /// Resolves its own bearer token; the token stays local to this call and
+    /// is dropped afterwards. `statuses` filters server-side when given and
+    /// is sent as a GraphQL variable, never as query text.
     pub fn test_runs(
         &self,
-        test_issue_id: &str,
+        kind: XrayIssueKind,
+        issue_id: &str,
         statuses: Option<&[String]>,
     ) -> Result<TestRunPage, XrayClientError> {
         let token = self.authenticate()?;
-        self.get_test_runs(test_issue_id, statuses, &token)
+        self.get_test_runs(kind, issue_id, statuses, &token)
     }
 
     /// Exchanges the API key credentials for a bearer token. Xray answers
@@ -166,17 +196,19 @@ impl XrayClient {
 
     fn get_test_runs(
         &self,
-        test_issue_id: &str,
+        kind: XrayIssueKind,
+        issue_id: &str,
         statuses: Option<&[String]>,
         token: &str,
     ) -> Result<TestRunPage, XrayClientError> {
         let url = self.endpoint_url(GRAPHQL_SEGMENTS)?;
+        let (query, issue_ids_variable) = query_for(kind);
         // Absent statuses become JSON null so the variable is always set;
         // values never reach the query text itself.
         let body = json!({
-            "query": GET_TEST_RUNS_QUERY,
+            "query": query,
             "variables": {
-                "testIssueIds": [test_issue_id],
+                issue_ids_variable: [issue_id],
                 "statuses": statuses,
                 "limit": PAGE_LIMIT,
                 "start": PAGE_START,
@@ -302,10 +334,10 @@ mod tests {
 
     /// The variable declaration and argument list pinned verbatim against
     /// the official Xray Cloud getTestRuns schema: `statuses` is a nullable
-    /// `[String]` argument, so it may be sent as JSON null. This literal is
-    /// independent of `GET_TEST_RUNS_QUERY` and of every mock helper, so
-    /// changing the constant cannot make the mocks pass tautologically.
-    const DOCUMENTED_GET_TEST_RUNS_QUERY: &str = r#"query GetTestRuns($testIssueIds: [String], $statuses: [String], $limit: Int!, $start: Int) {
+    /// `[String]` argument, so it may be sent as JSON null. These literals
+    /// are independent of the query constants and of every mock helper, so
+    /// changing a constant cannot make the mocks pass tautologically.
+    const DOCUMENTED_GET_TEST_RUNS_FOR_TEST_QUERY: &str = r#"query GetTestRuns($testIssueIds: [String], $statuses: [String], $limit: Int!, $start: Int) {
   getTestRuns(testIssueIds: $testIssueIds, statuses: $statuses, limit: $limit, start: $start) {
     total
     start
@@ -320,9 +352,33 @@ mod tests {
   }
 }"#;
 
+    /// `testExecIssueIds` is the schema's nullable `[String]` filter for
+    /// Test Execution issue IDs.
+    const DOCUMENTED_GET_TEST_RUNS_FOR_TEST_EXECUTION_QUERY: &str = r#"query GetTestRuns($testExecIssueIds: [String], $statuses: [String], $limit: Int!, $start: Int) {
+  getTestRuns(testExecIssueIds: $testExecIssueIds, statuses: $statuses, limit: $limit, start: $start) {
+    total
+    start
+    limit
+    results {
+      id
+      status { name }
+      startedOn
+      finishedOn
+      testExecution { issueId }
+    }
+  }
+}"#;
+
     #[test]
-    fn the_get_test_runs_query_matches_the_documented_schema_shape() {
-        assert_eq!(GET_TEST_RUNS_QUERY, DOCUMENTED_GET_TEST_RUNS_QUERY);
+    fn the_get_test_runs_queries_match_the_documented_schema_shape() {
+        assert_eq!(
+            GET_TEST_RUNS_FOR_TEST_QUERY,
+            DOCUMENTED_GET_TEST_RUNS_FOR_TEST_QUERY
+        );
+        assert_eq!(
+            GET_TEST_RUNS_FOR_TEST_EXECUTION_QUERY,
+            DOCUMENTED_GET_TEST_RUNS_FOR_TEST_EXECUTION_QUERY
+        );
     }
 
     const CLIENT_ID: &str = "xray-client-id";
@@ -363,7 +419,7 @@ mod tests {
         statuses: Option<&'a [&'a str]>,
     ) -> httpmock::Mock<'a> {
         let expected_body = serde_json::json!({
-            "query": GET_TEST_RUNS_QUERY,
+            "query": GET_TEST_RUNS_FOR_TEST_QUERY,
             "variables": {
                 "testIssueIds": ["10400"],
                 "statuses": statuses,
@@ -403,7 +459,9 @@ mod tests {
         let _auth = auth_mock(&server);
         let graphql = graphql_mock_with_statuses(&server, page_body(0, 0), None);
 
-        client(&server).test_runs("10400", None).unwrap();
+        client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap();
 
         graphql.assert_calls(1);
     }
@@ -415,7 +473,7 @@ mod tests {
         let graphql = graphql_mock_with_statuses(&server, page_body(0, 0), Some(&["PASSED"]));
 
         client(&server)
-            .test_runs("10400", Some(&["PASSED".to_owned()]))
+            .test_runs(XrayIssueKind::Test, "10400", Some(&["PASSED".to_owned()]))
             .unwrap();
 
         graphql.assert_calls(1);
@@ -433,6 +491,7 @@ mod tests {
 
         client(&server)
             .test_runs(
+                XrayIssueKind::Test,
                 "10400",
                 Some(&[
                     "FAILED".to_owned(),
@@ -443,6 +502,64 @@ mod tests {
             .unwrap();
 
         graphql.assert_calls(1);
+    }
+
+    #[test]
+    fn a_test_queries_by_test_issue_ids_only() {
+        let server = MockServer::start();
+        let _auth = auth_mock(&server);
+        let graphql = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v2/graphql")
+                .json_body(serde_json::json!({
+                    "query": DOCUMENTED_GET_TEST_RUNS_FOR_TEST_QUERY,
+                    "variables": {
+                        "testIssueIds": ["10400"],
+                        "statuses": null,
+                        "limit": 100,
+                        "start": 0,
+                    },
+                }));
+            then.status(200).json_body(page_body(0, 0));
+        });
+
+        client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap();
+
+        graphql.assert_calls(1);
+    }
+
+    #[test]
+    fn a_test_execution_queries_by_test_execution_issue_ids_only() {
+        let server = MockServer::start();
+        let _auth = auth_mock(&server);
+        let graphql = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v2/graphql")
+                .header("Authorization", format!("Bearer {TOKEN}"))
+                .json_body(serde_json::json!({
+                    "query": DOCUMENTED_GET_TEST_RUNS_FOR_TEST_EXECUTION_QUERY,
+                    "variables": {
+                        "testExecIssueIds": ["10500"],
+                        "statuses": ["FAILED"],
+                        "limit": 100,
+                        "start": 0,
+                    },
+                }));
+            then.status(200).json_body(page_body(1, 1));
+        });
+
+        let page = client(&server)
+            .test_runs(
+                XrayIssueKind::TestExecution,
+                "10500",
+                Some(&["FAILED".to_owned()]),
+            )
+            .unwrap();
+
+        graphql.assert_calls(1);
+        assert_eq!(page.total, Some(1));
     }
 
     #[test]
@@ -464,7 +581,7 @@ mod tests {
         let auth = auth_mock(&server);
         let graphql = graphql_mock(&server, page_body(1, 1));
 
-        let page = match client(&server).test_runs("10400", None) {
+        let page = match client(&server).test_runs(XrayIssueKind::Test, "10400", None) {
             Ok(page) => page,
             Err(error) => {
                 eprintln!("error: {error:?}");
@@ -494,7 +611,7 @@ mod tests {
         let auth = auth_mock(&server);
         let graphql = graphql_mock(&server, page_body(0, 0));
 
-        let page = match client(&server).test_runs("10400", None) {
+        let page = match client(&server).test_runs(XrayIssueKind::Test, "10400", None) {
             Ok(page) => page,
             Err(error) => {
                 eprintln!("error: {error:?}");
@@ -516,7 +633,9 @@ mod tests {
         let auth = auth_mock(&server);
         let graphql = graphql_mock(&server, page_body(0, 0));
 
-        client(&server).test_runs("10400", None).unwrap();
+        client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap();
 
         auth.assert();
         graphql.assert();
@@ -532,7 +651,9 @@ mod tests {
             }));
         });
 
-        let error = client(&server).test_runs("10400", None).unwrap_err();
+        let error = client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap_err();
 
         assert!(matches!(error, XrayClientError::InvalidAuthResponse));
     }
@@ -546,7 +667,9 @@ mod tests {
                 .body(vec![b'a'; MAX_AUTH_RESPONSE_BYTES + 1]);
         });
 
-        let error = client(&server).test_runs("10400", None).unwrap_err();
+        let error = client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap_err();
 
         assert!(matches!(error, XrayClientError::ResponseTooLarge));
     }
@@ -561,7 +684,9 @@ mod tests {
                 .body(vec![b' '; MAX_GRAPHQL_RESPONSE_BYTES + 1]);
         });
 
-        let error = client(&server).test_runs("10400", None).unwrap_err();
+        let error = client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap_err();
 
         assert!(matches!(error, XrayClientError::ResponseTooLarge));
     }
@@ -572,7 +697,9 @@ mod tests {
         let _auth = auth_mock(&server);
         let _graphql = graphql_mock(&server, serde_json::json!({"data": null}));
 
-        let error = client(&server).test_runs("10400", None).unwrap_err();
+        let error = client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap_err();
 
         assert!(matches!(error, XrayClientError::InvalidGraphQlResponse));
     }
@@ -586,7 +713,9 @@ mod tests {
             serde_json::json!({"errors": [{"message": "Unknown field 'getTestRuns'"}]}),
         );
 
-        let error = client(&server).test_runs("10400", None).unwrap_err();
+        let error = client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap_err();
 
         assert_eq!(error.to_string(), "Xray GraphQL query failed");
     }
@@ -609,7 +738,9 @@ mod tests {
             serde_json::json!({"errors": [{"message": remote_message}]}),
         );
 
-        let error = client(&server).test_runs("10400", None).unwrap_err();
+        let error = client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap_err();
         let rendered = error.to_string();
 
         assert_eq!(rendered, "Xray GraphQL query failed");
@@ -644,7 +775,9 @@ mod tests {
         });
         let graphql = graphql_mock(&server, page_body(0, 0));
 
-        let error = client(&server).test_runs("10400", None).unwrap_err();
+        let error = client(&server)
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap_err();
 
         auth_redirect.assert_calls(1);
         stolen_endpoint.assert_calls(0);
@@ -675,7 +808,9 @@ mod tests {
                 then.status(status).body(leaky_body.clone());
             });
 
-            let error = client(&server).test_runs("10400", None).unwrap_err();
+            let error = client(&server)
+                .test_runs(XrayIssueKind::Test, "10400", None)
+                .unwrap_err();
             let rendered = error.to_string();
 
             assert_eq!(rendered, expected);
@@ -695,7 +830,9 @@ mod tests {
                 then.status(status).body("untrusted response data");
             });
 
-            let error = client(&server).test_runs("10400", None).unwrap_err();
+            let error = client(&server)
+                .test_runs(XrayIssueKind::Test, "10400", None)
+                .unwrap_err();
             let expected = match status {
                 401 => {
                     "Xray authentication failed (HTTP 401): check XRAY_CLIENT_ID and XRAY_CLIENT_SECRET"
@@ -821,7 +958,9 @@ mod tests {
         .unwrap();
 
         let started = std::time::Instant::now();
-        let error = client.test_runs("10400", None).unwrap_err();
+        let error = client
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap_err();
 
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -851,7 +990,9 @@ mod tests {
         };
         let client = XrayClient::new(&config).unwrap();
 
-        let error = client.test_runs("10400", None).unwrap_err();
+        let error = client
+            .test_runs(XrayIssueKind::Test, "10400", None)
+            .unwrap_err();
 
         assert!(matches!(error, XrayClientError::Http { .. }));
         let debug = format!("{error:?}");
@@ -891,7 +1032,7 @@ mod tests {
         let adversarial = r#"PASSED"}]
 \ mutation { deleteTestRun } { getTestRuns(limit: 1) \" trailing"#;
         let expected_body = serde_json::json!({
-            "query": GET_TEST_RUNS_QUERY,
+            "query": GET_TEST_RUNS_FOR_TEST_QUERY,
             "variables": {
                 "testIssueIds": ["10400"],
                 "statuses": [adversarial],
@@ -913,7 +1054,11 @@ mod tests {
         });
 
         let error = client(&server)
-            .test_runs("10400", Some(&[adversarial.to_owned()]))
+            .test_runs(
+                XrayIssueKind::Test,
+                "10400",
+                Some(&[adversarial.to_owned()]),
+            )
             .unwrap_err();
 
         _graphql.assert_calls(1);
