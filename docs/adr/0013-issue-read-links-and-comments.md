@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Date
 
@@ -25,6 +25,13 @@ in its `issuelinks` field. Each one has a link type with an `inward` and an
 status. Remote links, such as pull request URLs, are not an issue field. They
 come from `GET rest/api/3/issue/{key}/remotelink`, which is not paged, and each
 one holds the target in `object.title` and `object.url`.
+
+Comments were left out as well, so the discussion on a ticket never reached an
+agent. They come from `GET rest/api/3/issue/{key}/comment`, which is paged with
+`startAt` and `maxResults` and can be sorted oldest first with
+`orderBy=created`. Each page holds `comments`, `startAt`, `maxResults` and
+`total`. Each comment has `author.displayName`, a `created` timestamp and a
+`body` in ADF, the format the description uses.
 
 These response shapes come from Jira's REST API v3 documentation. They have not
 been checked against a real Jira instance yet.
@@ -59,12 +66,51 @@ been checked against a real Jira instance yet.
   otherwise only the title shows. jcli never requests a remote link URL.
 - A failed remote link request fails the whole command with exit code 3, and
   stdout stays empty.
+- Comments are opt-in with `issue read <KEY> --comments`. Without the flag
+  jcli sends no comment request and the output stays as it is, because a long
+  discussion can be much larger than the issue itself.
+- With the flag, jcli sends `GET rest/api/3/issue/{key}/comment` with
+  `startAt`, `maxResults` and `orderBy=created` after the remote link request.
+  Each request asks for `min(100, 1000 - fetched)` comments from the number
+  fetched so far. Paging stops at 1000 comments, when `startAt` plus the
+  comments on the page reach `total`, when a page has no `total`, or when a
+  page has no comments; the last rule ends a server that reports a higher
+  total than it sends. Each page is a GET request read through the 16 MiB
+  bounded metadata reader.
+- `src/jira/comment.rs` maps each comment to the value object `Comment`, with
+  the author's display name, `created` and the ADF body, and hands the
+  renderer `Comments`: the fetched comments and the last page's `total`. The
+  page shape and the author object stay in that file.
+- The output gets a `## Comments` section after `## Links`, oldest first:
+
+  ```text
+  ### <author> · <created>
+
+  <body rendered from ADF>
+  ```
+
+  An issue without comments shows `None`. When Jira's `total` is higher than
+  the number of comments shown, a last line says
+  `Showing the first <shown> of <total> comments.` Without a `total` no such
+  line is printed.
+- The author and the timestamp go through the same single-line sanitizing,
+  Markdown escaping and timestamp rule as the issue's `Created` value. A
+  missing or blank author or timestamp shows as `Unknown`, and a missing or
+  empty body as `No content.`
+- ADF headings in a comment body move three levels down, to at most level 6:
+  a level 1 heading becomes `####`. A comment's own heading is `###`, so a
+  heading in its body can no longer start a section that looks like
+  `## Links` or another comment. Levels 3 to 6 all become `######`, which
+  loses their order but keeps the page structure. Description headings keep
+  their level.
+- A failed comment request, on any page, fails the whole command with exit
+  code 3, and stdout stays empty.
 
 This decision supersedes no clause of [ADR 0007](0007-output-for-agents.md).
 ADR 0007 says `issue read` prints Markdown, that stdout stays empty on failure,
 that Jira values are reduced to safe text and that missing values show as
-`Unknown` or `None`. The links section follows all four rules. The list of
-sections in the `issue read` output was never recorded in an ADR.
+`Unknown` or `None`. The links and comments sections follow all four rules. The
+list of sections in the `issue read` output was never recorded in an ADR.
 
 ## Consequences
 
@@ -76,3 +122,11 @@ could otherwise be read. Linked issues show only key, summary and status;
 reading one needs another `issue read`. If Jira's real responses differ from the
 documented shapes, a missing field shows as `Unknown`, but a field of another
 JSON type fails the command with `Jira metadata response is invalid`.
+
+With `--comments`, agents read the discussion on a ticket in the same page.
+The flag adds one request per 100 comments, up to ten. A failed comment page,
+for example a permission problem or a rate limit on a later page, hides the
+whole issue. Comments added or deleted between page requests can be missed or
+shown twice. An issue with more than 1000 comments shows only the oldest 1000,
+so the latest discussion is the part that is cut. The comment's `updated`
+timestamp, edit author and visibility restrictions are not shown.
