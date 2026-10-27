@@ -1,13 +1,22 @@
 use serde::Deserialize;
 
-/// First page of `GET /rest/api/3/search/jql`. Jira's enhanced search
+/// One page of `GET /rest/api/3/search/jql`. Jira's enhanced search
 /// reports no total; `isLast` says whether more matches exist beyond this
-/// page. The page token and unknown fields are ignored because only the
-/// first page is ever fetched.
+/// page, and `nextPageToken` requests the next page. Unknown fields are
+/// ignored.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchPage {
     pub issues: Option<Vec<SearchIssue>>,
+    pub next_page_token: Option<String>,
+    pub is_last: Option<bool>,
+}
+
+/// The issues of all fetched search pages in Jira's order. `is_last` is the
+/// `isLast` value of the last fetched page, or `None` when Jira omitted it.
+#[derive(Debug, Clone)]
+pub struct SearchResults {
+    pub issues: Vec<SearchIssue>,
     pub is_last: Option<bool>,
 }
 
@@ -66,6 +75,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(page.is_last, Some(false));
+        assert_eq!(page.next_page_token.as_deref(), Some("opaque-token"));
         let issues = page.issues.unwrap();
         assert_eq!(issues.len(), 1);
         let issue = &issues[0];
@@ -115,6 +125,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(page.is_last, None);
+        assert_eq!(page.next_page_token, None);
         let issues = page.issues.unwrap();
         assert_eq!(issues.len(), 3);
         for issue in &issues {
