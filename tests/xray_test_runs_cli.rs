@@ -48,17 +48,61 @@ fn run_args(
 }
 
 fn mock_jira_issue(server: &MockServer) -> httpmock::Mock<'_> {
+    mock_jira_issue_with_fields(
+        server,
+        serde_json::json!({"issuetype": {"id": "10010", "name": "Test"}}),
+    )
+}
+
+/// Mocks the issue lookup for TEST-123 (ID 10400), which must ask Jira for
+/// the `issuetype` field only, and answers with the given `fields` object.
+fn mock_jira_issue_with_fields(
+    server: &MockServer,
+    fields: serde_json::Value,
+) -> httpmock::Mock<'_> {
     server.mock(|when, then| {
         when.method(GET)
             .path("/rest/api/3/issue/TEST-123")
-            .query_param("fields", "summary")
+            .query_param("fields", "issuetype")
             .query_param_count(r".*", r".*", 1)
             .header("Authorization", JIRA_AUTH_HEADER);
         then.status(200).json_body(serde_json::json!({
             "id": "10400",
             "key": "TEST-123",
-            "fields": {"summary": "Check login"}
+            "fields": fields
         }));
+    })
+}
+
+/// Mocks the Test Execution query: the issue ID travels in
+/// `testExecIssueIds`, and the body carries no `testIssueIds` filter.
+fn mock_graphql_for_test_execution<'a>(
+    server: &'a MockServer,
+    body: serde_json::Value,
+    statuses: Option<&'a [&'a str]>,
+) -> httpmock::Mock<'a> {
+    let variables = serde_json::json!({"variables": {
+        "testExecIssueIds": ["10400"],
+        "statuses": statuses,
+        "limit": 100,
+        "start": 0
+    }});
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/api/v2/graphql")
+            .header("Authorization", format!("Bearer {XRAY_TOKEN}"))
+            .json_body_includes(variables.to_string())
+            .body_includes("getTestRuns(testExecIssueIds: $testExecIssueIds, statuses: $statuses")
+            .body_excludes("testIssueIds");
+        then.status(200).json_body(body);
+    })
+}
+
+/// Matches any request on the Xray endpoints, to prove none was sent.
+fn mock_any_xray_request(server: &MockServer) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        when.method(POST).path_matches(r"^/api/v2/");
+        then.status(500);
     })
 }
 
@@ -98,7 +142,8 @@ fn mock_graphql_with_statuses<'a>(
             .path("/api/v2/graphql")
             .header("Authorization", format!("Bearer {XRAY_TOKEN}"))
             .json_body_includes(variables.as_str())
-            .body_includes("getTestRuns");
+            .body_includes("getTestRuns(testIssueIds: $testIssueIds, statuses: $statuses")
+            .body_excludes("testExecIssueIds");
         then.status(200).json_body(body);
     })
 }
@@ -173,7 +218,8 @@ fn prints_stable_json_for_the_first_page() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     let value: Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(value["testKey"], "TEST-123");
+    assert_eq!(value["issueKey"], "TEST-123");
+    assert_eq!(value["issueKind"], "test");
     assert_eq!(value["total"], 2);
     assert_eq!(value["returned"], 2);
     assert_eq!(value["truncated"], false);
@@ -206,6 +252,174 @@ fn truncation_compares_total_with_the_number_returned() {
     assert_eq!(value["total"], 5);
     assert_eq!(value["returned"], 3);
     assert_eq!(value["truncated"], true);
+}
+
+#[test]
+fn a_test_execution_key_queries_the_runs_it_contains() {
+    let server = MockServer::start();
+    let jira_issue = mock_jira_issue_with_fields(
+        &server,
+        serde_json::json!({"issuetype": {"id": "10011", "name": "Test Execution"}}),
+    );
+    let auth = mock_auth(&server);
+    let graphql = mock_graphql_for_test_execution(&server, page_body(2, 2), None);
+
+    let output = run(&server, &[]);
+
+    jira_issue.assert_calls(1);
+    auth.assert_calls(1);
+    graphql.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let value: Value = serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(value["issueKey"], "TEST-123");
+    assert_eq!(value["issueKind"], "testExecution");
+    assert_eq!(value["total"], 2);
+    assert_eq!(value["returned"], 2);
+    assert_eq!(value["runs"][0]["id"], "run-0");
+}
+
+#[test]
+fn a_test_execution_key_without_runs_prints_an_empty_list() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue_with_fields(
+        &server,
+        serde_json::json!({"issuetype": {"name": "Test Execution"}}),
+    );
+    let _auth = mock_auth(&server);
+    let graphql = mock_graphql_for_test_execution(&server, page_body(0, 0), None);
+
+    let output = run(&server, &[]);
+
+    graphql.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    let value: Value = serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(value["issueKind"], "testExecution");
+    assert_eq!(value["total"], 0);
+    assert_eq!(value["runs"], serde_json::json!([]));
+}
+
+#[test]
+fn status_and_sort_flags_work_for_a_test_execution_key() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue_with_fields(
+        &server,
+        serde_json::json!({"issuetype": {"name": "Test Execution"}}),
+    );
+    let _auth = mock_auth(&server);
+    let graphql = mock_graphql_for_test_execution(
+        &server,
+        results_page(serde_json::json!([
+            run_entry("run-old", "2024-05-01T12:00:00Z".into()),
+            run_entry("run-new", "2024-05-02T12:00:00Z".into())
+        ])),
+        Some(&["FAILED"]),
+    );
+
+    let output = run_args(
+        &server,
+        &[
+            "xray",
+            "test-runs",
+            "TEST-123",
+            "--json",
+            "--status",
+            "FAILED",
+            "--sort",
+            "started-on",
+            "--direction",
+            "asc",
+        ],
+        &[],
+    );
+
+    graphql.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        output_ids(&stdout),
+        [Some("run-old".to_owned()), Some("run-new".to_owned())]
+    );
+}
+
+#[test]
+fn another_issue_type_exits_three_without_an_xray_request() {
+    let server = MockServer::start();
+    let jira_issue =
+        mock_jira_issue_with_fields(&server, serde_json::json!({"issuetype": {"name": "Story"}}));
+    let xray = mock_any_xray_request(&server);
+
+    let output = run(&server, &[]);
+
+    jira_issue.assert_calls(1);
+    xray.assert_calls(0);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "error: TEST-123 is a Story, not an Xray Test or Test Execution\n"
+    );
+}
+
+#[test]
+fn type_names_match_case_sensitively() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue_with_fields(
+        &server,
+        serde_json::json!({"issuetype": {"name": "test execution"}}),
+    );
+    let xray = mock_any_xray_request(&server);
+
+    let output = run(&server, &[]);
+
+    xray.assert_calls(0);
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "error: TEST-123 is a test execution, not an Xray Test or Test Execution\n"
+    );
+}
+
+#[test]
+fn a_missing_issue_type_exits_three_without_an_xray_request() {
+    for fields in [
+        serde_json::json!({}),
+        serde_json::json!({"issuetype": null}),
+        serde_json::json!({"issuetype": {"name": ""}}),
+    ] {
+        let server = MockServer::start();
+        let _jira_issue = mock_jira_issue_with_fields(&server, fields.clone());
+        let xray = mock_any_xray_request(&server);
+
+        let output = run(&server, &[]);
+
+        xray.assert_calls(0);
+        assert_eq!(output.status.code(), Some(3), "{fields}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "error: TEST-123 is an unknown issue type, not an Xray Test or Test Execution\n",
+            "{fields}"
+        );
+    }
+}
+
+#[test]
+fn an_issue_type_with_control_characters_is_printed_on_one_safe_line() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue_with_fields(
+        &server,
+        serde_json::json!({"issuetype": {"name": "Epic\n\u{1b}[31mspoof\u{202E}"}}),
+    );
+    let _xray = mock_any_xray_request(&server);
+
+    let output = run(&server, &[]);
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "error: TEST-123 is an Epic [31mspoof, not an Xray Test or Test Execution\n"
+    );
 }
 
 #[test]
@@ -433,7 +647,7 @@ fn flat_config_file_keys_supply_jira_and_xray_values() {
     graphql.assert_calls(1);
     assert_eq!(output.status.code(), Some(0));
     let value: Value = serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
-    assert_eq!(value["testKey"], "TEST-123");
+    assert_eq!(value["issueKey"], "TEST-123");
 }
 
 #[test]
