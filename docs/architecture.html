@@ -259,7 +259,7 @@
         <tr><td><code>jcli issue search --jql &lt;JQL&gt; --json [--limit N]</code></td><td>Up to N matching issues as JSON, fetched page by page</td></tr>
         <tr><td><code>jcli issue attachments list &lt;KEY&gt; --json [--name GLOB]... [--id ID]...</code></td><td>The issue's attachment metadata as JSON</td></tr>
         <tr><td><code>jcli issue attachments download &lt;KEY&gt; [--out DIR] [--name GLOB]... [--id ID]...</code></td><td>A Markdown list of the downloaded files</td></tr>
-        <tr><td><code>jcli xray test-runs &lt;KEY&gt; --json [--status S]... [--sort started-on] [--direction asc|desc] [--details]</code></td><td>The first page of test runs of a Test or Test Execution issue as JSON</td></tr>
+        <tr><td><code>jcli xray test-runs &lt;KEY&gt; --json [--status S]... [--sort started-on] [--direction asc|desc] [--details] [--limit N]</code></td><td>Up to N test runs of a Test or Test Execution issue as JSON, fetched page by page</td></tr>
         <tr><td><code>jcli whoami</code></td><td>The account the credentials belong to, on one line</td></tr>
       </tbody>
     </table>
@@ -430,9 +430,10 @@
     <code>IssueReference</code>, the value object with the numeric ID and issue type name that
     <code>xray test-runs</code> needs.</li>
     <li><a href="../src/xray/"><code>src/xray/</code></a>: the Xray side. <a href="../src/xray/client.rs"><code>client.rs</code></a> exchanges the API key for a bearer token
-    and runs the <code>getTestRuns</code> GraphQL query with the filter for the issue kind.
-    <a href="../src/xray/test_runs.rs"><code>test_runs.rs</code></a> holds <code>XrayIssueKind</code>, the response models, the page sort and
-    the <code>TestRunsOutput</code> JSON contract.</li>
+    and runs the <code>getTestRuns</code> GraphQL query with the filter for the issue kind,
+    page by page, and merges the pages into one. <a href="../src/xray/test_runs.rs"><code>test_runs.rs</code></a> holds
+    <code>XrayIssueKind</code>, the response models, the sort and the <code>TestRunsOutput</code> JSON
+    contract.</li>
     <li><a href="../src/adf/"><code>src/adf/</code></a>: translates Jira's Atlassian Document Format (ADF) into Markdown and
     renders the issue page for <code>issue read</code>
     (<a href="adr/0008-hand-rolled-adf-to-markdown-renderer.md">ADR 0008</a>).</li>
@@ -677,21 +678,31 @@
 
   <h3 id="xray" class="xray">Xray</h3>
   <p>Xray Cloud authenticates and queries over POST, so <code>XrayClient</code> cannot be GET-only.
-  It sends two requests per <code>xray test-runs</code> call, and neither changes Xray data:</p>
+  It sends one authentication request and one or more GraphQL requests per
+  <code>xray test-runs</code> call, and none of them changes Xray data:</p>
   <ol>
     <li><code>POST api/v2/authenticate</code> with the client ID and secret. Xray answers with a
     bearer token as a bare JSON string, read up to 64 KiB. The token lives only
     for this call.</li>
     <li><code>POST api/v2/graphql</code> with the bearer token and the <code>getTestRuns</code> query for the
-    numeric issue ID. A Test sends the ID as <code>testIssueIds</code>, a Test Execution or
+    numeric issue ID, once per page. A Test sends the ID as <code>testIssueIds</code>, a Test Execution or
     Sub Test Execution as <code>testExecIssueIds</code>. Both kinds select the same run
     fields; <code>--details</code> adds <code>comment</code>, <code>defects</code>, <code>evidence</code>, <code>steps</code> and
-    <code>results</code> to them. Tests pin all four query texts. <code>limit</code> is 100 and <code>start</code>
-    is 0. <code>--status</code> values travel as a GraphQL
-    variable, never as query text. The response is read up to 16 MiB.</li>
+    <code>results</code> to them. Tests pin all four query texts. <code>--status</code> values travel
+    as a GraphQL variable, never as query text. Each response is read up to
+    16 MiB.</li>
   </ol>
 
-  <p>The Xray client follows no redirects, because both requests carry credentials. It
+  <p><code>xray test-runs</code> pages through the runs
+  (<a href="adr/0011-xray-issue-kinds.md">ADR 0011</a>). Each request asks for
+  <code>limit: min(100, remaining)</code> runs, where <code>remaining</code> is <code>--limit</code> minus the runs
+  collected so far, and <code>start</code> is the number of runs collected so far. The query
+  and the other variables stay the same on every page. Paging stops once <code>--limit</code>
+  runs are collected, when <code>start</code> plus the page's runs reaches the page's <code>total</code>,
+  when a page has no <code>total</code>, or when a page returns no runs. A failed page fails
+  the whole command.</p>
+
+  <p>The Xray client follows no redirects, because all its requests carry credentials. It
   uses the same 10 second connect and 30 second request timeouts. Status codes map
   like the Jira ones. A GraphQL <code>errors</code> array in a 200 response becomes the generic
   <code>Xray GraphQL query failed</code>; the server's message is discarded because it may echo
@@ -748,9 +759,11 @@
   <code>comment</code>, <code>evidence</code>) and <code>results</code> (<code>name</code>, <code>status</code>, <code>log</code>, <code>duration</code>). <code>log</code>
   holds the error output of an automated result. jcli doesn't download evidence and
   passes <code>downloadLink</code> through. A missing value or list is null, and a null list
-  entry stays null. <code>truncated</code> is <code>total &gt; returned</code>, or null without a total. <code>--sort
-  started-on</code> reorders only the returned page, newest first unless <code>--direction asc</code>
-  is given. Runs with a missing or unparseable <code>startedOn</code> come after dated runs,
+  entry stays null. <code>total</code> is the total Xray reported on the last fetched page,
+  <code>returned</code> counts the runs of all fetched pages, <code>start</code> is 0 and <code>limit</code> is the
+  requested <code>--limit</code>, which defaults to 100 and accepts 1 to 1000. <code>truncated</code> is
+  <code>total &gt; returned</code>, or null without a total. <code>--sort started-on</code> reorders the runs
+  of all fetched pages, newest first unless <code>--direction asc</code> is given. Runs with a missing or unparseable <code>startedOn</code> come after dated runs,
   and null entries come last. Ties break by run ID, then by original position.</p>
 
   <p><code>issue attachments list</code> prints pretty JSON with <code>issue</code>, <code>returned</code> and

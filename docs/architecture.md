@@ -14,7 +14,7 @@ blocking reqwest, without an async runtime ([ADR 0002](adr/0002-build-jcli-as-a-
 | `jcli issue search --jql <JQL> --json [--limit N]` | Up to N matching issues as JSON, fetched page by page |
 | `jcli issue attachments list <KEY> --json [--name GLOB]... [--id ID]...` | The issue's attachment metadata as JSON |
 | `jcli issue attachments download <KEY> [--out DIR] [--name GLOB]... [--id ID]...` | A Markdown list of the downloaded files |
-| `jcli xray test-runs <KEY> --json [--status S]... [--sort started-on] [--direction asc\|desc] [--details]` | The first page of test runs of a Test or Test Execution issue as JSON |
+| `jcli xray test-runs <KEY> --json [--status S]... [--sort started-on] [--direction asc\|desc] [--details] [--limit N]` | Up to N test runs of a Test or Test Execution issue as JSON, fetched page by page |
 | `jcli whoami` | The account the credentials belong to, on one line |
 
 `<KEY>` is a canonical issue key such as `ABC-123`: a project part of 2 to 10
@@ -100,9 +100,10 @@ agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
   `IssueReference`, the value object with the numeric ID and issue type name that
   `xray test-runs` needs.
 - `src/xray/`: the Xray side. `client.rs` exchanges the API key for a bearer token
-  and runs the `getTestRuns` GraphQL query with the filter for the issue kind.
-  `test_runs.rs` holds `XrayIssueKind`, the response models, the page sort and
-  the `TestRunsOutput` JSON contract.
+  and runs the `getTestRuns` GraphQL query with the filter for the issue kind,
+  page by page, and merges the pages into one. `test_runs.rs` holds
+  `XrayIssueKind`, the response models, the sort and the `TestRunsOutput` JSON
+  contract.
 - `src/adf/`: translates Jira's Atlassian Document Format (ADF) into Markdown and
   renders the issue page for `issue read`
   ([ADR 0008](adr/0008-hand-rolled-adf-to-markdown-renderer.md)).
@@ -273,20 +274,30 @@ message the error falls back to the generic HTTP 400.
 ### Xray
 
 Xray Cloud authenticates and queries over POST, so `XrayClient` cannot be GET-only.
-It sends two requests per `xray test-runs` call, and neither changes Xray data:
+It sends one authentication request and one or more GraphQL requests per
+`xray test-runs` call, and none of them changes Xray data:
 
 1. `POST api/v2/authenticate` with the client ID and secret. Xray answers with a
    bearer token as a bare JSON string, read up to 64 KiB. The token lives only
    for this call.
 2. `POST api/v2/graphql` with the bearer token and the `getTestRuns` query for the
-   numeric issue ID. A Test sends the ID as `testIssueIds`, a Test Execution or
+   numeric issue ID, once per page. A Test sends the ID as `testIssueIds`, a Test Execution or
    Sub Test Execution as `testExecIssueIds`. Both kinds select the same run
    fields; `--details` adds `comment`, `defects`, `evidence`, `steps` and
-   `results` to them. Tests pin all four query texts. `limit` is 100 and `start`
-   is 0. `--status` values travel as a GraphQL
-   variable, never as query text. The response is read up to 16 MiB.
+   `results` to them. Tests pin all four query texts. `--status` values travel
+   as a GraphQL variable, never as query text. Each response is read up to
+   16 MiB.
 
-The Xray client follows no redirects, because both requests carry credentials. It
+`xray test-runs` pages through the runs
+([ADR 0011](adr/0011-xray-issue-kinds.md)). Each request asks for
+`limit: min(100, remaining)` runs, where `remaining` is `--limit` minus the runs
+collected so far, and `start` is the number of runs collected so far. The query
+and the other variables stay the same on every page. Paging stops once `--limit`
+runs are collected, when `start` plus the page's runs reaches the page's `total`,
+when a page has no `total`, or when a page returns no runs. A failed page fails
+the whole command.
+
+The Xray client follows no redirects, because all its requests carry credentials. It
 uses the same 10 second connect and 30 second request timeouts. Status codes map
 like the Jira ones. A GraphQL `errors` array in a 200 response becomes the generic
 `Xray GraphQL query failed`; the server's message is discarded because it may echo
@@ -345,9 +356,11 @@ null. With `--details` each run also has `comment`, `defects` (issue IDs),
 `comment`, `evidence`) and `results` (`name`, `status`, `log`, `duration`). `log`
 holds the error output of an automated result. jcli doesn't download evidence and
 passes `downloadLink` through. A missing value or list is null, and a null list
-entry stays null. `truncated` is `total > returned`, or null without a total. `--sort
-started-on` reorders only the returned page, newest first unless `--direction asc`
-is given. Runs with a missing or unparseable `startedOn` come after dated runs,
+entry stays null. `total` is the total Xray reported on the last fetched page,
+`returned` counts the runs of all fetched pages, `start` is 0 and `limit` is the
+requested `--limit`, which defaults to 100 and accepts 1 to 1000. `truncated` is
+`total > returned`, or null without a total. `--sort started-on` reorders the runs
+of all fetched pages, newest first unless `--direction asc` is given. Runs with a missing or unparseable `startedOn` come after dated runs,
 and null entries come last. Ties break by run ID, then by original position.
 
 `issue attachments list` prints pretty JSON with `issue`, `returned` and
