@@ -175,9 +175,9 @@ pub enum TestRunSortDirection {
 /// Sorts the returned runs in place by the requested field. Xray makes no
 /// ordering promise for its pages, so this only reorders what the server
 /// already returned, across all fetched pages; it can never surface runs
-/// beyond the requested limit. Valid `startedOn` timestamps sort first, ordered by instant
-/// (oldest first for asc, newest first for desc), then runs with a missing
-/// or unparseable timestamp, then null entries. Equal instants break ties
+/// beyond the requested limit. Valid `startedOn` timestamps sort first,
+/// ordered by instant (oldest first for asc, newest first for desc), then
+/// runs with a missing or unparseable timestamp, then null entries. Equal instants break ties
 /// by run ID (null IDs last) and finally by original position, so the
 /// result is deterministic in both directions.
 pub(crate) fn sort_page(
