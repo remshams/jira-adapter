@@ -96,7 +96,7 @@ fn render_issue_link(link: &IssueLink) -> String {
 fn render_remote_link(link: &RemoteLink) -> String {
     let title = metadata_or_unknown(link.title.as_deref());
     match link.url.as_deref().filter(|url| is_safe_link(url)) {
-        Some(url) => format!("- Remote: {title} <{}>", escape_link_destination(url)),
+        Some(url) => format!("- Remote: {title} <{}>", escape_autolink_destination(url)),
         None => format!("- Remote: {title}"),
     }
 }
@@ -517,6 +517,15 @@ fn escape_link_destination(href: &str) -> String {
         }
     }
     escaped
+}
+
+/// An angle-bracket autolink ends at a space or `<`/`>`, so only those are
+/// percent-encoded. Parentheses, quotes and backslashes are literal there,
+/// and encoding them would change the URL.
+fn escape_autolink_destination(url: &str) -> String {
+    url.replace(' ', "%20")
+        .replace('<', "%3C")
+        .replace('>', "%3E")
 }
 
 fn escape_metadata(text: &str) -> String {
@@ -1587,6 +1596,22 @@ mod tests {
         assert_eq!(
             output,
             "## Links\n\n- Remote: Title <https://example.com/a%20b%3Cc%3Ed>\n"
+        );
+    }
+
+    #[test]
+    fn remote_link_urls_keep_parentheses_quotes_and_backslashes() {
+        let output = links_section(
+            Vec::new(),
+            &[remote_link(
+                Some("Title"),
+                Some(r#"https://example.com/a(b)"c"\d"#),
+            )],
+        );
+
+        assert_eq!(
+            output,
+            "## Links\n\n- Remote: Title <https://example.com/a(b)\"c\"\\d>\n"
         );
     }
 
