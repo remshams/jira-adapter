@@ -45,13 +45,10 @@ enum IssueCommand {
         /// Canonical issue key (e.g. ABC-123)
         issue: String,
     },
-    /// Download all attachments for an issue (Unix only)
+    /// List or download an issue's attachments
     Attachments {
-        /// Canonical issue key (e.g. ABC-123)
-        issue: String,
-        /// Destination directory; defaults to ./<issue-key>/
-        #[arg(long, value_name = "DIRECTORY")]
-        out: Option<PathBuf>,
+        #[command(subcommand)]
+        command: AttachmentsCommand,
     },
     /// Search issues with JQL and print the first page as JSON
     Search {
@@ -69,6 +66,26 @@ enum IssueCommand {
             value_parser = clap::value_parser!(u32).range(1..=100)
         )]
         limit: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum AttachmentsCommand {
+    /// List an issue's attachments as JSON without downloading them
+    List {
+        /// Canonical issue key (e.g. ABC-123)
+        issue: String,
+        /// Emit JSON output (required in this version)
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Download all attachments for an issue (Unix only)
+    Download {
+        /// Canonical issue key (e.g. ABC-123)
+        issue: String,
+        /// Destination directory; defaults to ./<issue-key>/
+        #[arg(long, value_name = "DIRECTORY")]
+        out: Option<PathBuf>,
     },
 }
 
@@ -107,12 +124,19 @@ fn main() {
 fn run_issue(command: IssueCommand) -> ! {
     match command {
         IssueCommand::Read { issue } => commands::read_issue(&issue),
-        IssueCommand::Attachments { issue, out } => commands::download_attachments(&issue, out),
+        IssueCommand::Attachments { command } => run_attachments(command),
         IssueCommand::Search {
             jql,
             json: _,
             limit,
         } => commands::search_issues(&jql, limit),
+    }
+}
+
+fn run_attachments(command: AttachmentsCommand) -> ! {
+    match command {
+        AttachmentsCommand::List { issue, json: _ } => commands::list_attachments(&issue),
+        AttachmentsCommand::Download { issue, out } => commands::download_attachments(&issue, out),
     }
 }
 
