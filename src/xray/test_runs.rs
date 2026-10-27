@@ -2,10 +2,64 @@ use std::cmp::Ordering;
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::output;
+use crate::output::terminal_field;
+
+/// The kind of Xray issue that `getTestRuns` can filter by. It follows from
+/// the Jira issue type name and decides which filter the query uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum XrayIssueKind {
+    /// A Test issue: its runs across all Test Executions.
+    Test,
+    /// A Test Execution issue: the runs it contains.
+    TestExecution,
+}
+
+/// The issue exists but its type is neither of Xray's default `Test` and
+/// `Test Execution` types.
+#[derive(Debug, PartialEq, Eq, Error)]
+#[error("{issue_key} is {issue_type}, not an Xray Test or Test Execution")]
+pub struct NotAnXrayIssue {
+    issue_key: String,
+    issue_type: String,
+}
+
+impl XrayIssueKind {
+    /// Maps a Jira issue type name to the Xray kind. Matches Xray's default
+    /// type names exactly and case-sensitively; any other or missing name is
+    /// an error that names the issue and its type on one terminal-safe line.
+    pub fn for_issue(issue_key: &str, issue_type: Option<&str>) -> Result<Self, NotAnXrayIssue> {
+        match issue_type {
+            Some("Test") => Ok(Self::Test),
+            Some("Test Execution") => Ok(Self::TestExecution),
+            _ => Err(NotAnXrayIssue {
+                issue_key: issue_key.to_owned(),
+                issue_type: describe_issue_type(issue_type),
+            }),
+        }
+    }
+}
+
+/// Names the issue type with its indefinite article, for example `a Story`
+/// or `an Epic`. The name is Jira data, so it is reduced to one safe line.
+fn describe_issue_type(issue_type: Option<&str>) -> String {
+    let name = terminal_field(issue_type, "");
+    let name = name.trim();
+    let Some(first) = name.chars().next() else {
+        return "an unknown issue type".to_owned();
+    };
+    let article = if "AEIOUaeiou".contains(first) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("{article} {name}")
+}
 
 /// Envelope of Xray's GraphQL endpoint. `errors` may be present even though
 /// the HTTP status is 200, so it is checked before the data is used. The
@@ -183,11 +237,14 @@ fn compare_ids(a: &Option<TestRun>, b: &Option<TestRun>) -> Ordering {
 
 /// Stable JSON output of `jcli xray test-runs`. Nullable values stay null
 /// instead of turning into empty strings; `truncated` is null when the
-/// server did not report a total to compare against.
+/// server did not report a total to compare against. `issue_kind` names the
+/// filter that was queried, so an empty `runs` list means no runs for that
+/// issue.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestRunsOutput {
-    pub test_key: String,
+    pub issue_key: String,
+    pub issue_kind: XrayIssueKind,
     pub total: Option<i64>,
     pub returned: usize,
     pub truncated: Option<bool>,
@@ -211,7 +268,7 @@ impl TestRunsOutput {
     /// of a non-null results list, including null entries; a null results
     /// list counts as zero. `truncated` compares the reported total with
     /// that count and is null when no total is available.
-    pub fn from_page(test_key: &str, page: &TestRunPage) -> Self {
+    pub fn from_page(issue_key: &str, issue_kind: XrayIssueKind, page: &TestRunPage) -> Self {
         let runs = page
             .results
             .iter()
@@ -231,7 +288,8 @@ impl TestRunsOutput {
             .collect();
         let returned = page.results.as_ref().map_or(0, |results| results.len());
         TestRunsOutput {
-            test_key: test_key.to_owned(),
+            issue_key: issue_key.to_owned(),
+            issue_kind,
             total: page.total,
             returned,
             truncated: page.total.map(|total| total > returned as i64),
@@ -291,9 +349,9 @@ mod tests {
             })]),
         };
 
-        let output = TestRunsOutput::from_page("TEST-123", &page);
+        let output = TestRunsOutput::from_page("TEST-123", XrayIssueKind::Test, &page);
 
-        assert_eq!(output.test_key, "TEST-123");
+        assert_eq!(output.issue_key, "TEST-123");
         assert_eq!(output.total, Some(2));
         assert_eq!(output.returned, 1);
         assert_eq!(output.truncated, Some(true));
@@ -314,6 +372,7 @@ mod tests {
     fn truncation_compares_total_with_the_number_returned() {
         let full_page = TestRunsOutput::from_page(
             "TEST-123",
+            XrayIssueKind::Test,
             &page_with(
                 Some(100),
                 Some(
@@ -327,6 +386,7 @@ mod tests {
 
         let shorter_page = TestRunsOutput::from_page(
             "TEST-123",
+            XrayIssueKind::Test,
             &page_with(
                 Some(5),
                 Some(vec![Some(run_with("1")), None, Some(run_with("3"))]),
@@ -338,8 +398,11 @@ mod tests {
         assert_eq!(shorter_page.runs.len(), 3);
         assert!(shorter_page.runs[1].is_none());
 
-        let empty_page =
-            TestRunsOutput::from_page("TEST-123", &page_with(Some(0), Some(Vec::new())));
+        let empty_page = TestRunsOutput::from_page(
+            "TEST-123",
+            XrayIssueKind::Test,
+            &page_with(Some(0), Some(Vec::new())),
+        );
         assert_eq!(empty_page.truncated, Some(false));
         assert_eq!(empty_page.returned, 0);
     }
@@ -348,6 +411,7 @@ mod tests {
     fn a_missing_total_makes_truncation_null() {
         let page = TestRunsOutput::from_page(
             "TEST-123",
+            XrayIssueKind::Test,
             &page_with(None, Some(vec![Some(run_with("1"))])),
         );
 
@@ -358,7 +422,8 @@ mod tests {
 
     #[test]
     fn a_null_results_list_and_null_entries_are_preserved() {
-        let output = TestRunsOutput::from_page("TEST-123", &page_with(Some(2), None));
+        let output =
+            TestRunsOutput::from_page("TEST-123", XrayIssueKind::Test, &page_with(Some(2), None));
         assert_eq!(output.returned, 0);
         assert_eq!(output.runs, Vec::new());
         assert_eq!(output.truncated, Some(true));
@@ -366,6 +431,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(
             &TestRunsOutput::from_page(
                 "TEST-123",
+                XrayIssueKind::Test,
                 &page_with(Some(2), Some(vec![None, Some(run_with("2"))])),
             )
             .to_pretty_json(),
@@ -380,6 +446,7 @@ mod tests {
     fn a_null_run_id_stays_null() {
         let output = TestRunsOutput::from_page(
             "TEST-123",
+            XrayIssueKind::Test,
             &page_with(
                 Some(1),
                 Some(vec![Some(TestRun {
@@ -405,12 +472,14 @@ mod tests {
     fn json_output_is_pretty_and_camel_cased() {
         let output = TestRunsOutput::from_page(
             "TEST-123",
+            XrayIssueKind::Test,
             &page_with(Some(1), Some(vec![Some(run_with("0"))])),
         );
         let json = output.to_pretty_json();
 
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["testKey"], "TEST-123");
+        assert_eq!(value["issueKey"], "TEST-123");
+        assert_eq!(value["issueKind"], "test");
         assert_eq!(value["total"], 1);
         assert_eq!(value["returned"], 1);
         assert_eq!(value["truncated"], false);
@@ -421,10 +490,31 @@ mod tests {
     }
 
     #[test]
+    fn json_output_names_the_queried_issue_and_kind_first() {
+        let output = TestRunsOutput::from_page(
+            "EXEC-7",
+            XrayIssueKind::TestExecution,
+            &page_with(Some(0), Some(Vec::new())),
+        );
+        let json = output.to_pretty_json();
+
+        assert!(
+            json.starts_with(
+                "{\n  \"issueKey\": \"EXEC-7\",\n  \"issueKind\": \"testExecution\",\n"
+            ),
+            "{json}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("testKey").is_none());
+        assert_eq!(value["runs"], serde_json::json!([]));
+    }
+
+    #[test]
     fn pretty_json_escapes_bidi_code_points_but_parses_to_the_same_value() {
         let status_with_bidi = "PASSED\u{202E}dessaP\u{200F}".to_owned();
         let output = TestRunsOutput::from_page(
             "TEST-123",
+            XrayIssueKind::Test,
             &page_with(
                 Some(1),
                 Some(vec![Some(TestRun {
@@ -465,6 +555,7 @@ mod tests {
         let status_with_c1 = "PASSED\u{009B}4m\u{009D}\u{009C}\u{007F}".to_owned();
         let output = TestRunsOutput::from_page(
             "TEST-123",
+            XrayIssueKind::Test,
             &page_with(
                 Some(1),
                 Some(vec![Some(TestRun {
@@ -693,5 +784,87 @@ mod tests {
         );
 
         assert!(page.results.is_none());
+    }
+
+    fn error_message(issue_type: Option<&str>) -> String {
+        XrayIssueKind::for_issue("ABC-1", issue_type)
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn default_xray_type_names_map_to_their_kind() {
+        assert_eq!(
+            XrayIssueKind::for_issue("ABC-1", Some("Test")),
+            Ok(XrayIssueKind::Test)
+        );
+        assert_eq!(
+            XrayIssueKind::for_issue("ABC-1", Some("Test Execution")),
+            Ok(XrayIssueKind::TestExecution)
+        );
+    }
+
+    #[test]
+    fn type_names_match_exactly_and_case_sensitively() {
+        for name in [
+            "test",
+            "TEST",
+            "Test ",
+            "test execution",
+            "Test Plan",
+            "Tests",
+        ] {
+            assert!(
+                XrayIssueKind::for_issue("ABC-1", Some(name)).is_err(),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_types_name_the_issue_and_its_type() {
+        assert_eq!(
+            error_message(Some("Story")),
+            "ABC-1 is a Story, not an Xray Test or Test Execution"
+        );
+        assert_eq!(
+            error_message(Some("Epic")),
+            "ABC-1 is an Epic, not an Xray Test or Test Execution"
+        );
+        assert_eq!(
+            error_message(Some("improvement")),
+            "ABC-1 is an improvement, not an Xray Test or Test Execution"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_blank_type_falls_back_to_unknown() {
+        for issue_type in [None, Some(""), Some("  "), Some("\u{1b}\u{202E}")] {
+            assert_eq!(
+                error_message(issue_type),
+                "ABC-1 is an unknown issue type, not an Xray Test or Test Execution",
+                "{issue_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_type_name_is_reduced_to_one_terminal_safe_line() {
+        assert_eq!(
+            error_message(Some(" Bug\r\nreport\u{1b}[31m\u{202E} ")),
+            "ABC-1 is a Bug report[31m, not an Xray Test or Test Execution"
+        );
+    }
+
+    #[test]
+    fn kinds_serialize_as_camel_case_names() {
+        assert_eq!(
+            serde_json::to_value(XrayIssueKind::Test).unwrap(),
+            serde_json::json!("test")
+        );
+        assert_eq!(
+            serde_json::to_value(XrayIssueKind::TestExecution).unwrap(),
+            serde_json::json!("testExecution")
+        );
     }
 }
