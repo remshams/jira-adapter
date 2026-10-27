@@ -29,7 +29,7 @@ const SEARCH_PAGE_SIZE: usize = 100;
 /// The most comments jcli asks Jira for in one comment request.
 const COMMENT_PAGE_SIZE: usize = 100;
 /// The most comments `issue read --comments` collects.
-pub(crate) const MAX_COMMENTS: usize = 1000;
+const MAX_COMMENTS: usize = 1000;
 pub(crate) const MAX_ATTACHMENT_METADATA_BYTES: usize = 16 * 1024 * 1024;
 /// Jira error bodies are short JSON documents; anything larger is not one.
 const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
