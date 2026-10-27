@@ -93,6 +93,7 @@ pub struct TestRunPage {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct TestRun {
     pub id: Option<String>,
@@ -100,11 +101,51 @@ pub struct TestRun {
     pub started_on: Option<String>,
     pub finished_on: Option<String>,
     pub test_execution: Option<TestExecutionRef>,
+    /// The detail fields below are only selected with `--details`; the
+    /// default query leaves them out, so they deserialize as `None`.
+    pub comment: Option<String>,
+    /// Issue IDs of the defects linked to the run.
+    pub defects: Option<Vec<Option<String>>>,
+    pub evidence: Option<Vec<Option<Evidence>>>,
+    pub steps: Option<Vec<Option<TestRunStep>>>,
+    /// Results of automated tests, such as JUnit test cases.
+    pub results: Option<Vec<Option<TestRunResult>>>,
 }
 
+/// A status with its name. Xray's `Status` of a run and `StepStatus` of a
+/// step or result both select only `name`, so they share this model.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TestRunStatus {
     pub name: Option<String>,
+}
+
+/// A file attached to a run or step. jcli passes `downloadLink` through and
+/// never downloads the file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Evidence {
+    pub filename: Option<String>,
+    pub download_link: Option<String>,
+}
+
+/// Xray's `TestRunStep`: the outcome of one manual test step.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestRunStep {
+    pub status: Option<TestRunStatus>,
+    pub actual_result: Option<String>,
+    pub comment: Option<String>,
+    pub evidence: Option<Vec<Option<Evidence>>>,
+}
+
+/// Xray's `Result`: one automated result imported into the run. `log` holds
+/// the error or failure output; `duration` is passed through unchanged.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestRunResult {
+    pub name: Option<String>,
+    pub status: Option<TestRunStatus>,
+    pub log: Option<String>,
+    pub duration: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,31 +292,117 @@ pub struct TestRunOutput {
     pub started_on: Option<String>,
     pub finished_on: Option<String>,
     pub test_execution_issue_id: Option<String>,
+    /// Present only with `--details`. Flattened, so its fields sit next to
+    /// the ones above; without `--details` none of them appear.
+    #[serde(flatten)]
+    pub details: Option<TestRunDetailsOutput>,
+}
+
+/// The `--details` fields of a run. A field Xray leaves out is null, and a
+/// null list entry stays null.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestRunDetailsOutput {
+    pub comment: Option<String>,
+    pub defects: Option<Vec<Option<String>>>,
+    pub evidence: Option<Vec<Option<EvidenceOutput>>>,
+    pub steps: Option<Vec<Option<TestRunStepOutput>>>,
+    pub results: Option<Vec<Option<TestRunResultOutput>>>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceOutput {
+    pub filename: Option<String>,
+    pub download_link: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestRunStepOutput {
+    pub status: Option<String>,
+    pub actual_result: Option<String>,
+    pub comment: Option<String>,
+    pub evidence: Option<Vec<Option<EvidenceOutput>>>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct TestRunResultOutput {
+    pub name: Option<String>,
+    pub status: Option<String>,
+    pub log: Option<String>,
+    pub duration: Option<f64>,
+}
+
+/// Maps a nullable list with nullable entries, keeping both kinds of null.
+fn map_list<T, U>(list: &Option<Vec<Option<T>>>, map: impl Fn(&T) -> U) -> Option<Vec<Option<U>>> {
+    list.as_ref().map(|entries| {
+        entries
+            .iter()
+            .map(|entry| entry.as_ref().map(&map))
+            .collect()
+    })
+}
+
+fn status_name(status: &Option<TestRunStatus>) -> Option<String> {
+    status.as_ref().and_then(|status| status.name.clone())
+}
+
+fn evidence_output(
+    evidence: &Option<Vec<Option<Evidence>>>,
+) -> Option<Vec<Option<EvidenceOutput>>> {
+    map_list(evidence, |evidence| EvidenceOutput {
+        filename: evidence.filename.clone(),
+        download_link: evidence.download_link.clone(),
+    })
+}
+
+impl TestRunDetailsOutput {
+    fn from_run(run: &TestRun) -> Self {
+        TestRunDetailsOutput {
+            comment: run.comment.clone(),
+            defects: run.defects.clone(),
+            evidence: evidence_output(&run.evidence),
+            steps: map_list(&run.steps, |step| TestRunStepOutput {
+                status: status_name(&step.status),
+                actual_result: step.actual_result.clone(),
+                comment: step.comment.clone(),
+                evidence: evidence_output(&step.evidence),
+            }),
+            results: map_list(&run.results, |result| TestRunResultOutput {
+                name: result.name.clone(),
+                status: status_name(&result.status),
+                log: result.log.clone(),
+                duration: result.duration,
+            }),
+        }
+    }
 }
 
 impl TestRunsOutput {
     /// Builds the CLI output from one page. `returned` counts every entry
     /// of a non-null results list, including null entries; a null results
     /// list counts as zero. `truncated` compares the reported total with
-    /// that count and is null when no total is available.
-    pub fn from_page(issue_key: &str, issue_kind: XrayIssueKind, page: &TestRunPage) -> Self {
-        let runs = page
-            .results
-            .iter()
-            .flatten()
-            .map(|entry| {
-                entry.as_ref().map(|run| TestRunOutput {
-                    id: run.id.clone(),
-                    status: run.status.as_ref().and_then(|status| status.name.clone()),
-                    started_on: run.started_on.clone(),
-                    finished_on: run.finished_on.clone(),
-                    test_execution_issue_id: run
-                        .test_execution
-                        .as_ref()
-                        .and_then(|execution| execution.issue_id.clone()),
-                })
-            })
-            .collect();
+    /// that count and is null when no total is available. `details` adds
+    /// the `--details` fields to every run.
+    pub fn from_page(
+        issue_key: &str,
+        issue_kind: XrayIssueKind,
+        page: &TestRunPage,
+        details: bool,
+    ) -> Self {
+        let runs = map_list(&page.results, |run| TestRunOutput {
+            id: run.id.clone(),
+            status: status_name(&run.status),
+            started_on: run.started_on.clone(),
+            finished_on: run.finished_on.clone(),
+            test_execution_issue_id: run
+                .test_execution
+                .as_ref()
+                .and_then(|execution| execution.issue_id.clone()),
+            details: details.then(|| TestRunDetailsOutput::from_run(run)),
+        })
+        .unwrap_or_default();
         let returned = page.results.as_ref().map_or(0, |results| results.len());
         TestRunsOutput {
             issue_key: issue_key.to_owned(),
@@ -301,6 +428,11 @@ mod tests {
     use super::*;
     use crate::output::BIDI_CODE_POINTS;
 
+    /// Output without `--details`.
+    fn summary(issue_key: &str, issue_kind: XrayIssueKind, page: &TestRunPage) -> TestRunsOutput {
+        TestRunsOutput::from_page(issue_key, issue_kind, page, false)
+    }
+
     fn run_with(id: &str) -> TestRun {
         TestRun {
             id: Some(id.to_owned()),
@@ -310,6 +442,7 @@ mod tests {
             started_on: None,
             finished_on: None,
             test_execution: None,
+            ..TestRun::default()
         }
     }
 
@@ -336,10 +469,11 @@ mod tests {
                 test_execution: Some(TestExecutionRef {
                     issue_id: Some("10500".to_owned()),
                 }),
+                ..TestRun::default()
             })]),
         };
 
-        let output = TestRunsOutput::from_page("TEST-123", XrayIssueKind::Test, &page);
+        let output = summary("TEST-123", XrayIssueKind::Test, &page);
 
         assert_eq!(output.issue_key, "TEST-123");
         assert_eq!(output.total, Some(2));
@@ -360,7 +494,7 @@ mod tests {
 
     #[test]
     fn truncation_compares_total_with_the_number_returned() {
-        let full_page = TestRunsOutput::from_page(
+        let full_page = summary(
             "TEST-123",
             XrayIssueKind::Test,
             &page_with(
@@ -374,7 +508,7 @@ mod tests {
         );
         assert_eq!(full_page.truncated, Some(false));
 
-        let shorter_page = TestRunsOutput::from_page(
+        let shorter_page = summary(
             "TEST-123",
             XrayIssueKind::Test,
             &page_with(
@@ -388,7 +522,7 @@ mod tests {
         assert_eq!(shorter_page.runs.len(), 3);
         assert!(shorter_page.runs[1].is_none());
 
-        let empty_page = TestRunsOutput::from_page(
+        let empty_page = summary(
             "TEST-123",
             XrayIssueKind::Test,
             &page_with(Some(0), Some(Vec::new())),
@@ -399,7 +533,7 @@ mod tests {
 
     #[test]
     fn a_missing_total_makes_truncation_null() {
-        let page = TestRunsOutput::from_page(
+        let page = summary(
             "TEST-123",
             XrayIssueKind::Test,
             &page_with(None, Some(vec![Some(run_with("1"))])),
@@ -412,14 +546,13 @@ mod tests {
 
     #[test]
     fn a_null_results_list_and_null_entries_are_preserved() {
-        let output =
-            TestRunsOutput::from_page("TEST-123", XrayIssueKind::Test, &page_with(Some(2), None));
+        let output = summary("TEST-123", XrayIssueKind::Test, &page_with(Some(2), None));
         assert_eq!(output.returned, 0);
         assert_eq!(output.runs, Vec::new());
         assert_eq!(output.truncated, Some(true));
 
         let parsed: serde_json::Value = serde_json::from_str(
-            &TestRunsOutput::from_page(
+            &summary(
                 "TEST-123",
                 XrayIssueKind::Test,
                 &page_with(Some(2), Some(vec![None, Some(run_with("2"))])),
@@ -434,7 +567,7 @@ mod tests {
 
     #[test]
     fn a_null_run_id_stays_null() {
-        let output = TestRunsOutput::from_page(
+        let output = summary(
             "TEST-123",
             XrayIssueKind::Test,
             &page_with(
@@ -445,6 +578,7 @@ mod tests {
                     started_on: None,
                     finished_on: None,
                     test_execution: Some(TestExecutionRef { issue_id: None }),
+                    ..TestRun::default()
                 })]),
             ),
         );
@@ -460,7 +594,7 @@ mod tests {
 
     #[test]
     fn json_output_is_pretty_and_camel_cased() {
-        let output = TestRunsOutput::from_page(
+        let output = summary(
             "TEST-123",
             XrayIssueKind::Test,
             &page_with(Some(1), Some(vec![Some(run_with("0"))])),
@@ -479,9 +613,226 @@ mod tests {
         assert!(json.ends_with("}\n"));
     }
 
+    fn evidence(filename: &str) -> Option<Evidence> {
+        Some(Evidence {
+            filename: Some(filename.to_owned()),
+            download_link: Some(format!("https://xray.example/{filename}")),
+        })
+    }
+
+    /// A run with every detail field set, including null list entries.
+    fn detailed_run() -> TestRun {
+        TestRun {
+            comment: Some("checkout failed".to_owned()),
+            defects: Some(vec![Some("10600".to_owned()), None]),
+            evidence: Some(vec![evidence("screen.png"), None]),
+            steps: Some(vec![
+                Some(TestRunStep {
+                    status: Some(TestRunStatus {
+                        name: Some("FAILED".to_owned()),
+                    }),
+                    actual_result: Some("HTTP 500".to_owned()),
+                    comment: Some("retried once".to_owned()),
+                    evidence: Some(vec![evidence("step.log")]),
+                }),
+                None,
+            ]),
+            results: Some(vec![
+                Some(TestRunResult {
+                    name: Some("checkout succeeds".to_owned()),
+                    status: Some(TestRunStatus {
+                        name: Some("FAILED".to_owned()),
+                    }),
+                    log: Some("AssertionError: expected 200, got 500".to_owned()),
+                    duration: Some(1520.5),
+                }),
+                None,
+            ]),
+            ..run_with("run-1")
+        }
+    }
+
+    fn rendered_runs(runs: Vec<Option<TestRun>>, details: bool) -> serde_json::Value {
+        let output = TestRunsOutput::from_page(
+            "TEST-123",
+            XrayIssueKind::Test,
+            &page_with(Some(1), Some(runs)),
+            details,
+        );
+        let value: serde_json::Value = serde_json::from_str(&output.to_pretty_json()).unwrap();
+        value["runs"].clone()
+    }
+
+    #[test]
+    fn without_details_a_run_renders_only_the_summary_fields() {
+        let output = TestRunsOutput::from_page(
+            "TEST-123",
+            XrayIssueKind::Test,
+            &page_with(Some(1), Some(vec![Some(detailed_run())])),
+            false,
+        );
+
+        assert_eq!(
+            output.to_pretty_json(),
+            r#"{
+  "issueKey": "TEST-123",
+  "issueKind": "test",
+  "total": 1,
+  "returned": 1,
+  "truncated": false,
+  "start": 0,
+  "limit": 100,
+  "runs": [
+    {
+      "id": "run-1",
+      "status": "PASSED",
+      "startedOn": null,
+      "finishedOn": null,
+      "testExecutionIssueId": null
+    }
+  ]
+}
+"#
+        );
+    }
+
+    #[test]
+    fn details_add_comment_defects_evidence_steps_and_results() {
+        let runs = rendered_runs(vec![Some(detailed_run()), None], true);
+
+        assert_eq!(
+            runs,
+            serde_json::json!([
+                {
+                    "id": "run-1",
+                    "status": "PASSED",
+                    "startedOn": null,
+                    "finishedOn": null,
+                    "testExecutionIssueId": null,
+                    "comment": "checkout failed",
+                    "defects": ["10600", null],
+                    "evidence": [
+                        {"filename": "screen.png", "downloadLink": "https://xray.example/screen.png"},
+                        null
+                    ],
+                    "steps": [
+                        {
+                            "status": "FAILED",
+                            "actualResult": "HTTP 500",
+                            "comment": "retried once",
+                            "evidence": [
+                                {"filename": "step.log", "downloadLink": "https://xray.example/step.log"}
+                            ]
+                        },
+                        null
+                    ],
+                    "results": [
+                        {
+                            "name": "checkout succeeds",
+                            "status": "FAILED",
+                            "log": "AssertionError: expected 200, got 500",
+                            "duration": 1520.5
+                        },
+                        null
+                    ]
+                },
+                null
+            ])
+        );
+    }
+
+    #[test]
+    fn missing_detail_fields_are_null() {
+        let run = TestRun {
+            steps: Some(vec![Some(TestRunStep {
+                status: Some(TestRunStatus { name: None }),
+                actual_result: None,
+                comment: None,
+                evidence: None,
+            })]),
+            results: Some(vec![Some(TestRunResult {
+                name: None,
+                status: None,
+                log: None,
+                duration: None,
+            })]),
+            evidence: Some(vec![Some(Evidence {
+                filename: None,
+                download_link: None,
+            })]),
+            ..run_with("run-1")
+        };
+
+        let runs = rendered_runs(vec![Some(run)], true);
+
+        assert!(runs[0]["comment"].is_null());
+        assert!(runs[0]["defects"].is_null());
+        assert_eq!(
+            runs[0]["evidence"],
+            serde_json::json!([{"filename": null, "downloadLink": null}])
+        );
+        assert_eq!(
+            runs[0]["steps"],
+            serde_json::json!([{
+                "status": null,
+                "actualResult": null,
+                "comment": null,
+                "evidence": null
+            }])
+        );
+        assert_eq!(
+            runs[0]["results"],
+            serde_json::json!([{"name": null, "status": null, "log": null, "duration": null}])
+        );
+    }
+
+    #[test]
+    fn empty_detail_lists_stay_empty() {
+        let run = TestRun {
+            defects: Some(Vec::new()),
+            evidence: Some(Vec::new()),
+            steps: Some(Vec::new()),
+            results: Some(Vec::new()),
+            ..run_with("run-1")
+        };
+
+        let runs = rendered_runs(vec![Some(run)], true);
+
+        for field in ["defects", "evidence", "steps", "results"] {
+            assert_eq!(runs[0][field], serde_json::json!([]), "{field}");
+        }
+        assert!(runs[0]["comment"].is_null());
+    }
+
+    #[test]
+    fn detail_strings_use_the_output_escaping() {
+        let run = TestRun {
+            results: Some(vec![Some(TestRunResult {
+                name: None,
+                status: None,
+                log: Some("fail\u{202E}\u{009B}31m".to_owned()),
+                duration: None,
+            })]),
+            ..run_with("run-1")
+        };
+        let output = TestRunsOutput::from_page(
+            "TEST-123",
+            XrayIssueKind::Test,
+            &page_with(Some(1), Some(vec![Some(run)])),
+            true,
+        );
+
+        let json = output.to_pretty_json();
+
+        assert!(
+            json.contains("\"log\": \"fail\\u202E\\u009B31m\""),
+            "{json}"
+        );
+    }
+
     #[test]
     fn json_output_names_the_queried_issue_and_kind_first() {
-        let output = TestRunsOutput::from_page(
+        let output = summary(
             "EXEC-7",
             XrayIssueKind::TestExecution,
             &page_with(Some(0), Some(Vec::new())),
@@ -502,7 +853,7 @@ mod tests {
     #[test]
     fn pretty_json_escapes_bidi_code_points_but_parses_to_the_same_value() {
         let status_with_bidi = "PASSED\u{202E}dessaP\u{200F}".to_owned();
-        let output = TestRunsOutput::from_page(
+        let output = summary(
             "TEST-123",
             XrayIssueKind::Test,
             &page_with(
@@ -515,6 +866,7 @@ mod tests {
                     started_on: None,
                     finished_on: None,
                     test_execution: None,
+                    ..TestRun::default()
                 })]),
             ),
         );
@@ -543,7 +895,7 @@ mod tests {
         // U+009B (CSI) and U+009D (OSC) plus DEL would otherwise reach the
         // terminal as raw bytes.
         let status_with_c1 = "PASSED\u{009B}4m\u{009D}\u{009C}\u{007F}".to_owned();
-        let output = TestRunsOutput::from_page(
+        let output = summary(
             "TEST-123",
             XrayIssueKind::Test,
             &page_with(
@@ -556,6 +908,7 @@ mod tests {
                     started_on: None,
                     finished_on: None,
                     test_execution: None,
+                    ..TestRun::default()
                 })]),
             ),
         );
@@ -585,6 +938,7 @@ mod tests {
             started_on: started_on.map(str::to_owned),
             finished_on: None,
             test_execution: None,
+            ..TestRun::default()
         })
     }
 
@@ -689,6 +1043,7 @@ mod tests {
                     started_on: Some("not-a-timestamp".to_owned()),
                     finished_on: None,
                     test_execution: None,
+                    ..TestRun::default()
                 }),
                 run_at("run-9", Some("2024-05-01T12:00:00Z")),
             ]),
@@ -725,6 +1080,7 @@ mod tests {
                     started_on: Some("2024-05-01T12:00:00Z".to_owned()),
                     finished_on: None,
                     test_execution: None,
+                    ..TestRun::default()
                 }),
             ]),
         );
