@@ -12,7 +12,8 @@ without an async runtime ([ADR 0002](adr/0002-build-jcli-as-a-single-rust-binary
 | --- | --- |
 | `jcli issue read <KEY>` | The issue as Markdown |
 | `jcli issue search --jql <JQL> --json [--limit N]` | The first page of matching issues as JSON |
-| `jcli issue attachments <KEY> [--out DIR]` | A Markdown list of the downloaded files |
+| `jcli issue attachments list <KEY> --json` | The issue's attachment metadata as JSON |
+| `jcli issue attachments download <KEY> [--out DIR]` | A Markdown list of the downloaded files |
 | `jcli xray test-runs <KEY> --json [--status S]... [--sort started-on] [--direction asc\|desc]` | The first page of the test issue's test runs as JSON |
 | `jcli whoami` | The account the credentials belong to, on one line |
 
@@ -31,7 +32,7 @@ flowchart TD
     Config --> Xray[src/xray/client.rs: Xray client]
     Jira --> JiraApi[Jira Cloud REST API v3]
     Xray --> XrayApi[Xray Cloud API v2]
-    Jira --> Render[adf, issue_search, attachments]
+    Jira --> Render[adf, issue_search, attachment_list, attachments]
     Xray --> TestRuns[xray/test_runs.rs: sort and JSON output]
     Render --> Stdout[stdout: Markdown or JSON, exit 0]
     TestRuns --> Stdout
@@ -67,8 +68,9 @@ empty on failure.
 | 4 | Filesystem failure, unsupported platform for attachments, or a failed stdout write |
 
 `xray test-runs` resolves the issue key to Jira's numeric issue ID with one Jira
-request, then calls Xray. `issue attachments` checks for Unix before it loads the
-configuration and exits 4 on other platforms.
+request, then calls Xray. `issue attachments download` checks for Unix before it
+loads the configuration and exits 4 on other platforms. `issue attachments list`
+runs on every platform.
 
 ## Modules and dependencies
 
@@ -98,6 +100,8 @@ agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
   ([ADR 0008](adr/0008-hand-rolled-adf-to-markdown-renderer.md)).
 - `src/issue_search.rs`: maps a Jira search page to the `IssueSearchOutput` JSON
   contract.
+- `src/attachment_list.rs`: maps attachment metadata to the
+  `AttachmentListOutput` JSON contract.
 - `src/attachments.rs`: plans and checks attachment downloads, builds safe file
   names, and streams and writes each file
   ([ADR 0009](adr/0009-attachment-downloads.md)).
@@ -106,7 +110,7 @@ agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
 
 There is no separate domain model between the Jira response and the output. The
 serde models in `src/jira/` and `src/xray/` hold only the requested fields, and
-`adf`, `issue_search` and `xray::test_runs` turn them straight into the output
+`adf`, `issue_search`, `attachment_list` and `xray::test_runs` turn them straight into the output
 contract. That translation is where Jira and Xray shapes end.
 
 Arrows show the imports that exist between modules.
@@ -121,6 +125,7 @@ flowchart TD
     Commands --> XrayClient[xray::client]
     Commands --> Adf[adf]
     Commands --> Attachments[attachments]
+    Commands --> AttachmentList[attachment_list]
     Commands --> IssueSearch[issue_search]
     Commands --> TestRuns
     Commands --> Output[output]
@@ -129,6 +134,9 @@ flowchart TD
     Attachments --> JiraAttachment[jira::attachment]
     Attachments --> IssueKey
     IssueSearch --> JiraSearch[jira::search]
+    AttachmentList --> JiraAttachment
+    AttachmentList --> IssueKey
+    AttachmentList --> Output
     IssueSearch --> Output
     JiraClient --> Config
     JiraClient --> IssueKey
@@ -214,7 +222,8 @@ timeout: a large video keeps downloading while data arrives.
 | `whoami` | `GET rest/api/3/myself` |
 | `issue read` | `GET rest/api/3/issue/{key}?fields=summary,issuetype,status,assignee,reporter,labels,created,description,attachment` |
 | `issue search` | `GET rest/api/3/search/jql?jql=...&maxResults=N&fields=summary,status,issuetype,created,updated,labels` |
-| `issue attachments` | `GET rest/api/3/issue/{key}?fields=attachment`, then `GET rest/api/3/attachment/content/{id}?redirect=false` per attachment |
+| `issue attachments list` | `GET rest/api/3/issue/{key}?fields=attachment` |
+| `issue attachments download` | `GET rest/api/3/issue/{key}?fields=attachment`, then `GET rest/api/3/attachment/content/{id}?redirect=false` per attachment |
 | `xray test-runs` | `GET rest/api/3/issue/{key}?fields=summary` for the numeric issue ID |
 
 jcli builds every URL from the configured base URL. It ignores the resource URLs
@@ -303,10 +312,17 @@ started-on` reorders only the returned page, newest first unless `--direction as
 is given. Runs with a missing or unparseable `startedOn` come after dated runs,
 and null entries come last. Ties break by run ID, then by original position.
 
-Both JSON outputs escape DEL, the C1 control range and bidirectional formatting
+`issue attachments list` prints pretty JSON with `issue`, `returned` and
+`attachments` ([ADR 0010](adr/0010-list-and-select-attachments.md)). Each
+attachment has `id`, `filename`, `size`, `created` and `mimeType`, in Jira's
+order. `filename` is Jira's name, not the sanitized name `download` writes.
+Missing `created` and `mimeType` values are null. An issue without attachments
+exits 0 with `"attachments": []`.
+
+All JSON outputs escape DEL, the C1 control range and bidirectional formatting
 characters as `\uXXXX`, so parsing the JSON returns the original text.
 
-`issue attachments` prints `# <KEY> attachments` followed by one `- <file name>`
+`issue attachments download` prints `# <KEY> attachments` followed by one `- <file name>`
 line per downloaded file, or `No attachments.` In the second case it creates no
 directory.
 
@@ -315,7 +331,7 @@ missing values.
 
 ## Attachment downloads
 
-`issue attachments` writes into `./<KEY>/`, or into the directory given with
+`issue attachments download` writes into `./<KEY>/`, or into the directory given with
 `--out`, which jcli uses as is. It plans every download before the first download
 and rejects the whole set when:
 
