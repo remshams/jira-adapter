@@ -11,7 +11,7 @@ blocking reqwest, without an async runtime ([ADR 0002](adr/0002-build-jcli-as-a-
 | Command | Output on stdout |
 | --- | --- |
 | `jcli issue read <KEY>` | The issue as Markdown |
-| `jcli issue search --jql <JQL> --json [--limit N]` | The first page of matching issues as JSON |
+| `jcli issue search --jql <JQL> --json [--limit N]` | Up to N matching issues as JSON, fetched page by page |
 | `jcli issue attachments list <KEY> --json [--name GLOB]... [--id ID]...` | The issue's attachment metadata as JSON |
 | `jcli issue attachments download <KEY> [--out DIR] [--name GLOB]... [--id ID]...` | A Markdown list of the downloaded files |
 | `jcli xray test-runs <KEY> --json [--status S]... [--sort started-on] [--direction asc\|desc] [--details]` | The first page of test runs of a Test or Test Execution issue as JSON |
@@ -91,12 +91,14 @@ agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
   `config.toml`. It owns `SanitizedUrl`, which the `Debug` output of `Config`,
   `XrayConfig` and `XrayClient` uses.
 - `src/jira/`: the Jira side of the anti-corruption layer. `client.rs` is the
-  GET-only HTTP client with status mapping, body limits and JQL error redaction.
-  `issue.rs`, `attachment.rs` and `search.rs` are serde models that deserialize
-  only the fields jcli requests. Jira's names such as `issuetype` and `isLast`
-  stop at their serde attributes. `issue.rs` also holds `IssueReference`, the
-  value object with the numeric ID and issue type name that `xray test-runs`
-  needs.
+  GET-only HTTP client with status mapping, body limits, JQL error redaction and
+  the search page loop. `issue.rs`, `attachment.rs` and `search.rs` are serde
+  models that deserialize only the fields jcli requests. Jira's names such as
+  `issuetype` and `isLast` stop at their serde attributes, and `nextPageToken`
+  never leaves the client. `search.rs` also holds `SearchResults`, the issues of
+  all fetched pages with the last page's `isLast`. `issue.rs` also holds
+  `IssueReference`, the value object with the numeric ID and issue type name that
+  `xray test-runs` needs.
 - `src/xray/`: the Xray side. `client.rs` exchanges the API key for a bearer token
   and runs the `getTestRuns` GraphQL query with the filter for the issue kind.
   `test_runs.rs` holds `XrayIssueKind`, the response models, the page sort and
@@ -104,8 +106,8 @@ agent. The ubiquitous language uses Jira's terms: `issue`, `issue key`,
 - `src/adf/`: translates Jira's Atlassian Document Format (ADF) into Markdown and
   renders the issue page for `issue read`
   ([ADR 0008](adr/0008-hand-rolled-adf-to-markdown-renderer.md)).
-- `src/issue_search.rs`: maps a Jira search page to the `IssueSearchOutput` JSON
-  contract.
+- `src/issue_search.rs`: maps the collected search results to the
+  `IssueSearchOutput` JSON contract.
 - `src/attachment_list.rs`: maps attachment metadata to the
   `AttachmentListOutput` JSON contract.
 - `src/attachment_selection.rs`: `AttachmentSelection`, a value object holding
@@ -235,7 +237,7 @@ timeout: a large video keeps downloading while data arrives.
 | --- | --- |
 | `whoami` | `GET rest/api/3/myself` |
 | `issue read` | `GET rest/api/3/issue/{key}?fields=summary,issuetype,status,assignee,reporter,labels,created,description,attachment` |
-| `issue search` | `GET rest/api/3/search/jql?jql=...&maxResults=N&fields=summary,status,issuetype,created,updated,labels` |
+| `issue search` | `GET rest/api/3/search/jql?jql=...&maxResults=N&fields=summary,status,issuetype,created,updated,labels`, then the same request with `&nextPageToken=...` per further page |
 | `issue attachments list` | `GET rest/api/3/issue/{key}?fields=attachment` |
 | `issue attachments download` | `GET rest/api/3/issue/{key}?fields=attachment`, then `GET rest/api/3/attachment/content/{id}?redirect=false` per attachment |
 | `xray test-runs` | `GET rest/api/3/issue/{key}?fields=issuetype` for the numeric issue ID and the issue type |
@@ -244,9 +246,17 @@ jcli builds every URL from the configured base URL. It ignores the resource URLs
 in Jira's responses, and appends the issue key and attachment ID as single encoded
 path segments.
 
+`issue search` pages through the results
+([ADR 0012](adr/0012-search-paging.md)). Each request asks for
+`min(100, remaining)` issues, where `remaining` is `--limit` minus the issues
+collected so far. A request after the first adds the previous page's
+`nextPageToken` and keeps `jql` and `fields` unchanged. Paging stops once
+`--limit` issues are collected, when a page has `isLast: true`, or when a page
+has no `nextPageToken`. A failed page fails the whole search.
+
 Issue, search and attachment metadata responses are read into memory up to
-16 MiB; a larger body fails without truncation. `whoami` reads its small response
-without that limit.
+16 MiB; a larger body fails without truncation. The limit applies to each search
+page. `whoami` reads its small response without that limit.
 
 Status codes map to fixed messages: 401 names `JIRA_EMAIL` and `JIRA_API_TOKEN`,
 403 is a permission error, 404 names the resource, 429 asks to retry later, and
@@ -315,12 +325,14 @@ the text and known child content it can find instead of failing the issue.
 Comments are not rendered.
 
 `issue search` prints pretty JSON with `jql`, `returned`, `truncated` and
-`issues`. `truncated` is `!isLast`, or null when Jira omits `isLast`. Each issue
-has `key`, `issueType`, `status`, `summary`, `created`, `updated` and `labels`.
-Missing values stay null, except `labels`, which becomes `[]`. Issues keep Jira's
-order, so sorting is done with `ORDER BY` in the JQL. jcli passes the JQL to Jira
-unchanged and fetches only the first page; `--limit` defaults to 20 and accepts 1
-to 100. An empty result exits 0 with `"issues": []`.
+`issues`. `returned` counts the issues of all fetched pages. `truncated` is
+`!isLast` of the last fetched page: `true` when the limit or a missing token
+stopped paging while Jira reports more matches, and null when that page has no
+`isLast`. Each issue has `key`, `issueType`, `status`, `summary`, `created`,
+`updated` and `labels`. Missing values stay null, except `labels`, which becomes
+`[]`. Issues keep Jira's order across pages, so sorting is done with `ORDER BY`
+in the JQL. jcli passes the JQL to Jira unchanged; `--limit` defaults to 20 and
+accepts 1 to 1000. An empty result exits 0 with `"issues": []`.
 
 `xray test-runs` prints pretty JSON with `issueKey`, `issueKind`, `total`,
 `returned`, `truncated`, `start`, `limit` and `runs`. `issueKind` is `test` or
