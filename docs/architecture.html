@@ -731,9 +731,9 @@
   <p><code>issue search</code> prints pretty JSON with <code>jql</code>, <code>returned</code>, <code>truncated</code> and
   <code>issues</code>. <code>returned</code> counts the issues of all fetched pages. <code>truncated</code> is
   <code>!isLast</code> of the last fetched page: <code>true</code> when the limit, a missing token or an
-  empty page stopped paging while Jira reports more matches, and null when that page has no
-  <code>isLast</code>. Each issue has <code>key</code>, <code>issueType</code>, <code>status</code>, <code>summary</code>, <code>created</code>,
-  <code>updated</code> and <code>labels</code>. Missing values stay null, except <code>labels</code>, which becomes
+  empty page stopped paging while Jira reports more matches, and null when that
+  page has no <code>isLast</code>. Each issue has <code>key</code>, <code>issueType</code>, <code>status</code>, <code>summary</code>,
+  <code>created</code>, <code>updated</code> and <code>labels</code>. Missing values stay null, except <code>labels</code>, which becomes
   <code>[]</code>. Issues keep Jira's order across pages, so sorting is done with <code>ORDER BY</code>
   in the JQL. jcli passes the JQL to Jira unchanged; <code>--limit</code> defaults to 20 and
   accepts 1 to 1000. An empty result exits 0 with <code>"issues": []</code>.</p>

@@ -328,9 +328,9 @@ Comments are not rendered.
 `issue search` prints pretty JSON with `jql`, `returned`, `truncated` and
 `issues`. `returned` counts the issues of all fetched pages. `truncated` is
 `!isLast` of the last fetched page: `true` when the limit, a missing token or an
-empty page stopped paging while Jira reports more matches, and null when that page has no
-`isLast`. Each issue has `key`, `issueType`, `status`, `summary`, `created`,
-`updated` and `labels`. Missing values stay null, except `labels`, which becomes
+empty page stopped paging while Jira reports more matches, and null when that
+page has no `isLast`. Each issue has `key`, `issueType`, `status`, `summary`,
+`created`, `updated` and `labels`. Missing values stay null, except `labels`, which becomes
 `[]`. Issues keep Jira's order across pages, so sorting is done with `ORDER BY`
 in the JQL. jcli passes the JQL to Jira unchanged; `--limit` defaults to 20 and
 accepts 1 to 1000. An empty result exits 0 with `"issues": []`.
