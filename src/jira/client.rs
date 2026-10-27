@@ -188,12 +188,10 @@ impl JiraClient {
         loop {
             let max_results = (limit - issues.len()).min(SEARCH_PAGE_SIZE);
             let page = self.search_page(jql, max_results, token.as_deref())?;
-            let page_issues = page.issues.unwrap_or_default();
-            let empty_page = page_issues.is_empty();
-            issues.extend(page_issues);
+            let last = is_final_page(&page);
+            issues.extend(page.issues.unwrap_or_default());
             token = page.next_page_token;
-            if issues.len() >= limit || page.is_last == Some(true) || token.is_none() || empty_page
-            {
+            if last || issues.len() >= limit {
                 return Ok(SearchResults {
                     issues,
                     is_last: page.is_last,
@@ -388,6 +386,14 @@ struct ErrorCollection {
 /// names and messages become `[REDACTED]`. A body that is too large,
 /// unreadable, not an error collection, or without messages falls back to
 /// the generic status error.
+/// Whether paging ends after `page`: Jira marked it the last one, gave no
+/// token for the next one, or sent no issues on it.
+fn is_final_page(page: &SearchPage) -> bool {
+    page.is_last == Some(true)
+        || page.next_page_token.is_none()
+        || page.issues.as_ref().is_none_or(Vec::is_empty)
+}
+
 fn invalid_query_error(response: Response, credentials: &[String]) -> JiraClientError {
     query_error_messages(response, credentials).map_or(
         JiraClientError::Api { status: 400 },
