@@ -101,8 +101,8 @@ pub struct TestRun {
     pub started_on: Option<String>,
     pub finished_on: Option<String>,
     pub test_execution: Option<TestExecutionRef>,
-    /// The detail fields below are only selected with `--details`; the
-    /// default query leaves them out, so they deserialize as `None`.
+    // The detail fields below are only selected with `--details`; the
+    // default query leaves them out, so they deserialize as `None`.
     pub comment: Option<String>,
     /// Issue IDs of the defects linked to the run.
     pub defects: Option<Vec<Option<String>>>,
@@ -139,7 +139,7 @@ pub struct TestRunStep {
 }
 
 /// Xray's `Result`: one automated result imported into the run. `log` holds
-/// the error or failure output; `duration` is passed through unchanged.
+/// the error or failure output; `duration` is passed through as a number.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TestRunResult {
     pub name: Option<String>,
