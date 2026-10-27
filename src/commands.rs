@@ -26,8 +26,8 @@ pub(crate) fn read_issue(value: &str) -> ! {
 pub(crate) fn search_issues(jql: &str, limit: u32) -> ! {
     let config = load_config();
     let client = or_exit(JiraClient::new(&config), 3);
-    let page = or_exit(client.search_issues(jql, limit), 3);
-    write_stdout(&IssueSearchOutput::from_page(jql, page).to_pretty_json());
+    let results = or_exit(client.search_issues(jql, limit), 3);
+    write_stdout(&IssueSearchOutput::from_results(jql, results).to_pretty_json());
 }
 
 pub(crate) fn list_attachments(value: &str, selection: &AttachmentSelection) -> ! {
