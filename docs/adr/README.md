@@ -39,7 +39,7 @@ was first built; their Date is the date they were recorded.
 | [0004](0004-quality-gates.md) | Gate changes with Rust tooling, mutants and CRAP | Accepted |
 | [0005](0005-read-only-get-only-http-layer.md) | Read-only, GET-only Jira client | Accepted |
 | [0006](0006-configuration-sources-and-precedence.md) | Configuration sources and precedence | Accepted |
-| [0007](0007-output-for-agents.md) | Output for agents | Accepted |
+| [0007](0007-output-for-agents.md) | Output for agents | Partially superseded by [ADR 0010](0010-list-and-select-attachments.md) |
 | [0008](0008-hand-rolled-adf-to-markdown-renderer.md) | Hand-rolled ADF-to-Markdown renderer | Accepted |
-| [0009](0009-attachment-downloads.md) | Stream attachments into verified, atomically replaced files | Accepted |
-| [0010](0010-list-and-select-attachments.md) | List attachments and select which ones to download | Proposed |
+| [0009](0009-attachment-downloads.md) | Stream attachments into verified, atomically replaced files | Partially superseded by [ADR 0010](0010-list-and-select-attachments.md) |
+| [0010](0010-list-and-select-attachments.md) | List attachments and select which ones to download | Accepted |
