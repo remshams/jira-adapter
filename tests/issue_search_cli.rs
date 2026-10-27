@@ -53,7 +53,7 @@ fn any_request(server: &MockServer) -> httpmock::Mock<'_> {
 }
 
 #[test]
-fn prints_stable_json_for_the_first_page_in_jira_order() {
+fn prints_stable_json_in_jira_order() {
     let server = MockServer::start();
     let mock = search_mock(
         &server,
@@ -86,7 +86,6 @@ fn prints_stable_json_for_the_first_page_in_jira_order() {
                     }
                 }
             ],
-            "nextPageToken": "opaque-token",
             "isLast": false
         }),
     );
@@ -168,12 +167,12 @@ fn a_missing_is_last_makes_truncation_null() {
 }
 
 #[test]
-fn the_limit_bounds_are_passed_through() {
-    for limit in ["1", "100"] {
+fn the_limit_bounds_are_accepted_and_one_page_asks_for_at_most_100() {
+    for (limit, max_results) in [("1", "1"), ("100", "100"), ("1000", "100")] {
         let server = MockServer::start();
         let mock = search_mock(
             &server,
-            limit,
+            max_results,
             200,
             serde_json::json!({"issues": [], "isLast": true}),
         );
@@ -190,7 +189,7 @@ fn the_limit_bounds_are_passed_through() {
 
 #[test]
 fn limits_outside_the_range_are_rejected_before_any_request() {
-    for limit in ["0", "101", "-1", "ten"] {
+    for limit in ["0", "1001", "-1", "ten"] {
         let server = MockServer::start();
         let anything = any_request(&server);
         // The `=` form hands `-1` to the value parser instead of reading it
@@ -337,4 +336,159 @@ fn output_escapes_terminal_controls_in_jira_values() {
     );
     assert!(!stdout.contains('\u{202e}'));
     assert!(!stdout.contains('\u{9b}'));
+}
+
+fn next_page_mock<'a>(
+    server: &'a MockServer,
+    max_results: &str,
+    token: &str,
+    status: u16,
+    body: Value,
+) -> httpmock::Mock<'a> {
+    let max_results = max_results.to_owned();
+    let token = token.to_owned();
+    server.mock(move |when, then| {
+        when.method(GET)
+            .path("/rest/api/3/search/jql")
+            .query_param("jql", JQL)
+            .query_param("maxResults", max_results)
+            .query_param("fields", FIELDS)
+            .query_param("nextPageToken", token)
+            .query_param_count(r".*", r".*", 4)
+            .header("Authorization", AUTH_HEADER);
+        then.status(status).json_body(body);
+    })
+}
+
+fn search_with_limit(server: &MockServer, limit: &str) -> Output {
+    run(
+        server,
+        &["issue", "search", "--jql", JQL, "--json", "--limit", limit],
+    )
+}
+
+fn first_of_two_pages(server: &MockServer) -> httpmock::Mock<'_> {
+    search_mock(
+        server,
+        "3",
+        200,
+        serde_json::json!({
+            "issues": [
+                {"key": "ABC-5", "fields": {"summary": "Fifth", "labels": ["a"]}},
+                {"key": "ABC-4", "fields": {"summary": "Fourth"}}
+            ],
+            "nextPageToken": "page-2",
+            "isLast": false
+        }),
+    )
+}
+
+#[test]
+fn follows_the_page_token_until_the_limit_and_keeps_jira_order() {
+    let server = MockServer::start();
+    let first = first_of_two_pages(&server);
+    let second = next_page_mock(
+        &server,
+        "1",
+        "page-2",
+        200,
+        serde_json::json!({
+            "issues": [{"key": "ABC-3", "fields": {"summary": "Third"}}],
+            "nextPageToken": "page-3",
+            "isLast": false
+        }),
+    );
+
+    let output = search_with_limit(&server, "3");
+
+    first.assert_calls(1);
+    second.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        r#"{
+  "jql": "project = \"ABC\" AND text ~ \"a&b+c\" ORDER BY created DESC",
+  "returned": 3,
+  "truncated": true,
+  "issues": [
+    {
+      "key": "ABC-5",
+      "issueType": null,
+      "status": null,
+      "summary": "Fifth",
+      "created": null,
+      "updated": null,
+      "labels": [
+        "a"
+      ]
+    },
+    {
+      "key": "ABC-4",
+      "issueType": null,
+      "status": null,
+      "summary": "Fourth",
+      "created": null,
+      "updated": null,
+      "labels": []
+    },
+    {
+      "key": "ABC-3",
+      "issueType": null,
+      "status": null,
+      "summary": "Third",
+      "created": null,
+      "updated": null,
+      "labels": []
+    }
+  ]
+}
+"#
+    );
+}
+
+#[test]
+fn the_last_page_before_the_limit_is_not_truncated() {
+    let server = MockServer::start();
+    let first = first_of_two_pages(&server);
+    let second = next_page_mock(
+        &server,
+        "1",
+        "page-2",
+        200,
+        serde_json::json!({"issues": [{"key": "ABC-3"}], "isLast": true}),
+    );
+
+    let output = search_with_limit(&server, "3");
+
+    first.assert_calls(1);
+    second.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["returned"], 3);
+    assert_eq!(value["truncated"], false);
+}
+
+#[test]
+fn a_failed_second_page_fails_with_empty_stdout() {
+    let server = MockServer::start();
+    let first = first_of_two_pages(&server);
+    let second = next_page_mock(
+        &server,
+        "1",
+        "page-2",
+        500,
+        serde_json::json!({"errorMessages": ["cli-test-token"]}),
+    );
+
+    let output = search_with_limit(&server, "3");
+
+    first.assert_calls(1);
+    second.assert_calls(1);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "error: Jira API error (HTTP 500)\n"
+    );
 }
