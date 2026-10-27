@@ -951,6 +951,7 @@ const DETAIL_FIELDS: &[&str] = &[
     "comment",
     "defects",
     "evidence { filename downloadLink }",
+    "steps {",
     "actualResult",
     "log",
     "duration",
@@ -964,9 +965,7 @@ fn mock_graphql_with_details(server: &MockServer, body: serde_json::Value) -> ht
             .method(POST)
             .path("/api/v2/graphql")
             .header("Authorization", format!("Bearer {XRAY_TOKEN}"))
-            .body_includes("getTestRuns(testIssueIds: $testIssueIds, statuses: $statuses")
-            .body_includes("steps {")
-            .body_includes("status { name }\\n        log");
+            .body_includes("getTestRuns(testIssueIds: $testIssueIds, statuses: $statuses");
         for field in DETAIL_FIELDS {
             when = when.body_includes(*field);
         }
