@@ -13,8 +13,11 @@ fn issue_read(value: &str) -> Output {
     jcli(&["issue", "read", value], FAKE_CONFIG)
 }
 
-fn issue_attachments(value: &str) -> Output {
-    jcli(&["issue", "attachments", value], FAKE_CONFIG)
+fn issue_attachments(subcommand: &[&str], value: &str) -> Output {
+    let mut args = vec!["issue", "attachments"];
+    args.extend_from_slice(subcommand);
+    args.push(value);
+    jcli(&args, FAKE_CONFIG)
 }
 
 #[test]
@@ -47,14 +50,16 @@ fn valid_key_reaches_configuration_loading() {
 #[test]
 fn invalid_attachment_key_fails_before_configuration_loading() {
     let input = "https://example.atlassian.net/browse/AB-1";
-    let output = issue_attachments(input);
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    for subcommand in [&["download"][..], &["list", "--json"][..]] {
+        let output = issue_attachments(subcommand, input);
+        let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(
-        stderr,
-        "error: invalid Jira issue key: expected PROJECT-NUMBER\n"
-    );
-    assert!(!stderr.contains(input));
-    assert!(output.stdout.is_empty());
+        assert_eq!(output.status.code(), Some(1), "{subcommand:?}");
+        assert_eq!(
+            stderr,
+            "error: invalid Jira issue key: expected PROJECT-NUMBER\n"
+        );
+        assert!(!stderr.contains(input));
+        assert!(output.stdout.is_empty());
+    }
 }
