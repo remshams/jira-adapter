@@ -256,7 +256,7 @@
       <thead><tr><th scope="col">Command</th><th scope="col">Output on stdout</th></tr></thead>
       <tbody>
         <tr><td><code>jcli issue read &lt;KEY&gt;</code></td><td>The issue as Markdown</td></tr>
-        <tr><td><code>jcli issue search --jql &lt;JQL&gt; --json [--limit N]</code></td><td>The first page of matching issues as JSON</td></tr>
+        <tr><td><code>jcli issue search --jql &lt;JQL&gt; --json [--limit N]</code></td><td>Up to N matching issues as JSON, fetched page by page</td></tr>
         <tr><td><code>jcli issue attachments list &lt;KEY&gt; --json [--name GLOB]... [--id ID]...</code></td><td>The issue's attachment metadata as JSON</td></tr>
         <tr><td><code>jcli issue attachments download &lt;KEY&gt; [--out DIR] [--name GLOB]... [--id ID]...</code></td><td>A Markdown list of the downloaded files</td></tr>
         <tr><td><code>jcli xray test-runs &lt;KEY&gt; --json [--status S]... [--sort started-on] [--direction asc|desc] [--details]</code></td><td>The first page of test runs of a Test or Test Execution issue as JSON</td></tr>
@@ -421,12 +421,14 @@
     <code>config.toml</code>. It owns <code>SanitizedUrl</code>, which the <code>Debug</code> output of <code>Config</code>,
     <code>XrayConfig</code> and <code>XrayClient</code> uses.</li>
     <li><a href="../src/jira/"><code>src/jira/</code></a>: the Jira side of the anti-corruption layer. <a href="../src/jira/client.rs"><code>client.rs</code></a> is the
-    GET-only HTTP client with status mapping, body limits and JQL error redaction.
-    <a href="../src/jira/issue.rs"><code>issue.rs</code></a>, <a href="../src/jira/attachment.rs"><code>attachment.rs</code></a> and <a href="../src/jira/search.rs"><code>search.rs</code></a> are serde models that deserialize
-    only the fields jcli requests. Jira's names such as <code>issuetype</code> and <code>isLast</code>
-    stop at their serde attributes. <a href="../src/jira/issue.rs"><code>issue.rs</code></a> also holds <code>IssueReference</code>, the
-    value object with the numeric ID and issue type name that <code>xray test-runs</code>
-    needs.</li>
+    GET-only HTTP client with status mapping, body limits, JQL error redaction and
+    the search page loop. <a href="../src/jira/issue.rs"><code>issue.rs</code></a>, <a href="../src/jira/attachment.rs"><code>attachment.rs</code></a> and <a href="../src/jira/search.rs"><code>search.rs</code></a> are serde
+    models that deserialize only the fields jcli requests. Jira's names such as
+    <code>issuetype</code> and <code>isLast</code> stop at their serde attributes, and <code>nextPageToken</code>
+    never leaves the client. <a href="../src/jira/search.rs"><code>search.rs</code></a> also holds <code>SearchResults</code>, the issues of
+    all fetched pages with the last page's <code>isLast</code>. <a href="../src/jira/issue.rs"><code>issue.rs</code></a> also holds
+    <code>IssueReference</code>, the value object with the numeric ID and issue type name that
+    <code>xray test-runs</code> needs.</li>
     <li><a href="../src/xray/"><code>src/xray/</code></a>: the Xray side. <a href="../src/xray/client.rs"><code>client.rs</code></a> exchanges the API key for a bearer token
     and runs the <code>getTestRuns</code> GraphQL query with the filter for the issue kind.
     <a href="../src/xray/test_runs.rs"><code>test_runs.rs</code></a> holds <code>XrayIssueKind</code>, the response models, the page sort and
@@ -434,8 +436,8 @@
     <li><a href="../src/adf/"><code>src/adf/</code></a>: translates Jira's Atlassian Document Format (ADF) into Markdown and
     renders the issue page for <code>issue read</code>
     (<a href="adr/0008-hand-rolled-adf-to-markdown-renderer.md">ADR 0008</a>).</li>
-    <li><a href="../src/issue_search.rs"><code>src/issue_search.rs</code></a>: maps a Jira search page to the <code>IssueSearchOutput</code> JSON
-    contract.</li>
+    <li><a href="../src/issue_search.rs"><code>src/issue_search.rs</code></a>: maps the collected search results to the
+    <code>IssueSearchOutput</code> JSON contract.</li>
     <li><a href="../src/attachment_list.rs"><code>src/attachment_list.rs</code></a>: maps attachment metadata to the
     <code>AttachmentListOutput</code> JSON contract.</li>
     <li><a href="../src/attachment_selection.rs"><code>src/attachment_selection.rs</code></a>: <code>AttachmentSelection</code>, a value object holding
@@ -637,7 +639,7 @@
       <tbody>
         <tr><td><code>whoami</code></td><td><code>GET rest/api/3/myself</code></td></tr>
         <tr><td><code>issue read</code></td><td><code>GET rest/api/3/issue/{key}?fields=summary,issuetype,status,assignee,reporter,labels,created,description,attachment</code></td></tr>
-        <tr><td><code>issue search</code></td><td><code>GET rest/api/3/search/jql?jql=...&amp;maxResults=N&amp;fields=summary,status,issuetype,created,updated,labels</code></td></tr>
+        <tr><td><code>issue search</code></td><td><code>GET rest/api/3/search/jql?jql=...&amp;maxResults=N&amp;fields=summary,status,issuetype,created,updated,labels</code>, then the same request with <code>&amp;nextPageToken=...</code> per further page</td></tr>
         <tr><td><code>issue attachments list</code></td><td><code>GET rest/api/3/issue/{key}?fields=attachment</code></td></tr>
         <tr><td><code>issue attachments download</code></td><td><code>GET rest/api/3/issue/{key}?fields=attachment</code>, then <code>GET rest/api/3/attachment/content/{id}?redirect=false</code> per attachment</td></tr>
         <tr><td><code>xray test-runs</code></td><td><code>GET rest/api/3/issue/{key}?fields=issuetype</code> for the numeric issue ID and the issue type</td></tr>
@@ -649,9 +651,17 @@
   in Jira's responses, and appends the issue key and attachment ID as single encoded
   path segments.</p>
 
+  <p><code>issue search</code> pages through the results
+  (<a href="adr/0012-search-paging.md">ADR 0012</a>). Each request asks for
+  <code>min(100, remaining)</code> issues, where <code>remaining</code> is <code>--limit</code> minus the issues
+  collected so far. A request after the first adds the previous page's
+  <code>nextPageToken</code> and keeps <code>jql</code> and <code>fields</code> unchanged. Paging stops once
+  <code>--limit</code> issues are collected, when a page has <code>isLast: true</code>, or when a page
+  has no <code>nextPageToken</code>. A failed page fails the whole search.</p>
+
   <p>Issue, search and attachment metadata responses are read into memory up to
-  16 MiB; a larger body fails without truncation. <code>whoami</code> reads its small response
-  without that limit.</p>
+  16 MiB; a larger body fails without truncation. The limit applies to each search
+  page. <code>whoami</code> reads its small response without that limit.</p>
 
   <p>Status codes map to fixed messages: 401 names <code>JIRA_EMAIL</code> and <code>JIRA_API_TOKEN</code>,
   403 is a permission error, 404 names the resource, 429 asks to retry later, and
@@ -718,12 +728,14 @@
   Comments are not rendered.</p>
 
   <p><code>issue search</code> prints pretty JSON with <code>jql</code>, <code>returned</code>, <code>truncated</code> and
-  <code>issues</code>. <code>truncated</code> is <code>!isLast</code>, or null when Jira omits <code>isLast</code>. Each issue
-  has <code>key</code>, <code>issueType</code>, <code>status</code>, <code>summary</code>, <code>created</code>, <code>updated</code> and <code>labels</code>.
-  Missing values stay null, except <code>labels</code>, which becomes <code>[]</code>. Issues keep Jira's
-  order, so sorting is done with <code>ORDER BY</code> in the JQL. jcli passes the JQL to Jira
-  unchanged and fetches only the first page; <code>--limit</code> defaults to 20 and accepts 1
-  to 100. An empty result exits 0 with <code>"issues": []</code>.</p>
+  <code>issues</code>. <code>returned</code> counts the issues of all fetched pages. <code>truncated</code> is
+  <code>!isLast</code> of the last fetched page: <code>true</code> when the limit or a missing token
+  stopped paging while Jira reports more matches, and null when that page has no
+  <code>isLast</code>. Each issue has <code>key</code>, <code>issueType</code>, <code>status</code>, <code>summary</code>, <code>created</code>,
+  <code>updated</code> and <code>labels</code>. Missing values stay null, except <code>labels</code>, which becomes
+  <code>[]</code>. Issues keep Jira's order across pages, so sorting is done with <code>ORDER BY</code>
+  in the JQL. jcli passes the JQL to Jira unchanged; <code>--limit</code> defaults to 20 and
+  accepts 1 to 1000. An empty result exits 0 with <code>"issues": []</code>.</p>
 
   <p><code>xray test-runs</code> prints pretty JSON with <code>issueKey</code>, <code>issueKind</code>, <code>total</code>,
   <code>returned</code>, <code>truncated</code>, <code>start</code>, <code>limit</code> and <code>runs</code>. <code>issueKind</code> is <code>test</code> or
