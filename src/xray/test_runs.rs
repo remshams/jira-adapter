@@ -16,12 +16,12 @@ use crate::output::terminal_field;
 pub enum XrayIssueKind {
     /// A Test issue: its runs across all Test Executions.
     Test,
-    /// A Test Execution issue: the runs it contains.
+    /// A Test Execution or Sub Test Execution issue: the runs it contains.
     TestExecution,
 }
 
-/// The issue exists but its type is neither of Xray's default `Test` and
-/// `Test Execution` types.
+/// The issue exists but its type is none of Xray's default `Test`,
+/// `Test Execution` and `Sub Test Execution` types.
 #[derive(Debug, PartialEq, Eq, Error)]
 #[error("{issue_key} is {issue_type}, not an Xray Test or Test Execution")]
 pub struct NotAnXrayIssue {
@@ -36,7 +36,7 @@ impl XrayIssueKind {
     pub fn for_issue(issue_key: &str, issue_type: Option<&str>) -> Result<Self, NotAnXrayIssue> {
         match issue_type {
             Some("Test") => Ok(Self::Test),
-            Some("Test Execution") => Ok(Self::TestExecution),
+            Some("Test Execution" | "Sub Test Execution") => Ok(Self::TestExecution),
             _ => Err(NotAnXrayIssue {
                 issue_key: issue_key.to_owned(),
                 issue_type: describe_issue_type(issue_type),
@@ -800,6 +800,10 @@ mod tests {
         );
         assert_eq!(
             XrayIssueKind::for_issue("ABC-1", Some("Test Execution")),
+            Ok(XrayIssueKind::TestExecution)
+        );
+        assert_eq!(
+            XrayIssueKind::for_issue("ABC-1", Some("Sub Test Execution")),
             Ok(XrayIssueKind::TestExecution)
         );
     }
