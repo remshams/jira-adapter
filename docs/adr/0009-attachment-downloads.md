@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Partially superseded by [ADR 0010](0010-list-and-select-attachments.md); all other decisions remain accepted.
 
 ## Date
 
