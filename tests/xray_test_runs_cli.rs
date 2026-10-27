@@ -239,19 +239,193 @@ fn prints_stable_json_for_the_first_page() {
 }
 
 #[test]
-fn truncation_compares_total_with_the_number_returned() {
+fn by_default_one_page_of_100_runs_is_read_and_more_are_truncated() {
     let server = MockServer::start();
     let _jira_issue = mock_jira_issue(&server);
     let _auth = mock_auth(&server);
-    let _graphql = mock_graphql(&server, page_body(5, 3));
+    let graphql = mock_graphql(&server, page_body(250, 100));
 
     let output = run(&server, &[]);
 
+    graphql.assert_calls(1);
     assert_eq!(output.status.code(), Some(0));
     let value: Value = serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
-    assert_eq!(value["total"], 5);
-    assert_eq!(value["returned"], 3);
+    assert_eq!(value["total"], 250);
+    assert_eq!(value["returned"], 100);
     assert_eq!(value["truncated"], true);
+    assert_eq!(value["start"], 0);
+    assert_eq!(value["limit"], 100);
+}
+
+/// Mocks the page of TEST-123's runs at `start` with `limit`. The variables
+/// must match, so a request for a page the test did not plan fails.
+fn mock_page(
+    server: &MockServer,
+    start: usize,
+    limit: usize,
+    status: u16,
+    body: serde_json::Value,
+) -> httpmock::Mock<'_> {
+    let variables = serde_json::json!({"variables": {
+        "testIssueIds": ["10400"],
+        "statuses": null,
+        "limit": limit,
+        "start": start
+    }});
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/api/v2/graphql")
+            .header("Authorization", format!("Bearer {XRAY_TOKEN}"))
+            .json_body_includes(variables.to_string())
+            .body_includes("getTestRuns(testIssueIds: $testIssueIds, statuses: $statuses");
+        then.status(status).json_body(body);
+    })
+}
+
+/// Runs `run-<first>` onwards as one page; run N started N minutes after
+/// midnight, so later pages hold newer runs.
+fn numbered_page(total: i64, first: usize, count: usize) -> serde_json::Value {
+    let results: Vec<serde_json::Value> = (first..first + count)
+        .map(|number| {
+            let started_on = format!("2024-05-01T{:02}:{:02}:00Z", number / 60, number % 60);
+            run_entry(&format!("run-{number}"), serde_json::json!(started_on))
+        })
+        .collect();
+    serde_json::json!({"data": {"getTestRuns": {
+        "total": total,
+        "start": first,
+        "limit": 100,
+        "results": results
+    }}})
+}
+
+#[test]
+fn limit_reads_runs_across_two_pages() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let auth = mock_auth(&server);
+    let first = mock_page(&server, 0, 100, 200, numbered_page(400, 0, 100));
+    let second = mock_page(&server, 100, 50, 200, numbered_page(400, 100, 50));
+
+    let output = run_args(
+        &server,
+        &["xray", "test-runs", "TEST-123", "--json", "--limit", "150"],
+        &[],
+    );
+
+    auth.assert_calls(1);
+    first.assert_calls(1);
+    second.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["total"], 400);
+    assert_eq!(value["returned"], 150);
+    assert_eq!(value["truncated"], true);
+    assert_eq!(value["start"], 0);
+    assert_eq!(value["limit"], 150);
+    let expected: Vec<Option<String>> = (0..150).map(|n| Some(format!("run-{n}"))).collect();
+    assert_eq!(output_ids(&stdout), expected);
+}
+
+#[test]
+fn paging_stops_at_the_total_and_the_output_is_not_truncated() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let _auth = mock_auth(&server);
+    let first = mock_page(&server, 0, 100, 200, numbered_page(120, 0, 100));
+    let second = mock_page(&server, 100, 100, 200, numbered_page(120, 100, 20));
+
+    let output = run_args(
+        &server,
+        &["xray", "test-runs", "TEST-123", "--json", "--limit", "1000"],
+        &[],
+    );
+
+    first.assert_calls(1);
+    second.assert_calls(1);
+    assert_eq!(output.status.code(), Some(0));
+    let value: Value = serde_json::from_str(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(value["total"], 120);
+    assert_eq!(value["returned"], 120);
+    assert_eq!(value["truncated"], false);
+    assert_eq!(value["limit"], 1000);
+}
+
+#[test]
+fn sort_orders_the_runs_of_all_pages() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let _auth = mock_auth(&server);
+    let _first = mock_page(&server, 0, 100, 200, numbered_page(130, 0, 100));
+    let _second = mock_page(&server, 100, 100, 200, numbered_page(130, 100, 30));
+
+    let output = run_args(
+        &server,
+        &[
+            "xray",
+            "test-runs",
+            "TEST-123",
+            "--json",
+            "--limit",
+            "200",
+            "--sort",
+            "started-on",
+        ],
+        &[],
+    );
+
+    assert_eq!(output.status.code(), Some(0));
+    let ids = output_ids(&String::from_utf8(output.stdout).unwrap());
+    let expected: Vec<Option<String>> = (0..130).rev().map(|n| Some(format!("run-{n}"))).collect();
+    assert_eq!(ids, expected);
+}
+
+#[test]
+fn a_failed_second_page_exits_three_with_empty_stdout() {
+    let server = MockServer::start();
+    let _jira_issue = mock_jira_issue(&server);
+    let _auth = mock_auth(&server);
+    let first = mock_page(&server, 0, 100, 200, numbered_page(400, 0, 100));
+    let second = mock_page(&server, 100, 100, 500, serde_json::json!({}));
+
+    let output = run_args(
+        &server,
+        &["xray", "test-runs", "TEST-123", "--json", "--limit", "200"],
+        &[],
+    );
+
+    first.assert_calls(1);
+    second.assert_calls(1);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr, "error: Xray API error (HTTP 500)\n");
+}
+
+#[test]
+fn limits_outside_the_range_are_rejected_before_any_request() {
+    for limit in ["0", "1001", "-1", "ten"] {
+        let server = MockServer::start();
+        let anything = server.mock(|when, then| {
+            when.any_request();
+            then.status(200);
+        });
+        let limit_arg = format!("--limit={limit}");
+
+        let output = run_args(
+            &server,
+            &["xray", "test-runs", "TEST-123", "--json", &limit_arg],
+            &[],
+        );
+
+        assert_eq!(output.status.code(), Some(2), "limit {limit}");
+        assert!(output.stdout.is_empty(), "limit {limit}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("--limit"), "limit {limit}: {stderr}");
+        anything.assert_calls(0);
+    }
 }
 
 #[test]
