@@ -656,8 +656,9 @@
   <code>min(100, remaining)</code> issues, where <code>remaining</code> is <code>--limit</code> minus the issues
   collected so far. A request after the first adds the previous page's
   <code>nextPageToken</code> and keeps <code>jql</code> and <code>fields</code> unchanged. Paging stops once
-  <code>--limit</code> issues are collected, when a page has <code>isLast: true</code>, or when a page
-  has no <code>nextPageToken</code>. A failed page fails the whole search.</p>
+  <code>--limit</code> issues are collected, when a page has <code>isLast: true</code>, when a page has
+  no <code>nextPageToken</code>, or when a page adds no issues. A failed page fails the whole
+  search.</p>
 
   <p>Issue, search and attachment metadata responses are read into memory up to
   16 MiB; a larger body fails without truncation. The limit applies to each search
