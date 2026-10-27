@@ -68,11 +68,11 @@ empty on failure.
 | 4 | Filesystem failure, unsupported platform for attachments, or a failed stdout write |
 
 `xray test-runs` resolves the issue key to Jira's numeric issue ID and issue type
-with one Jira request. A `Test` or `Test Execution` issue goes on to Xray with the
-matching filter. Any other or missing type exits 3 before jcli sends an Xray
-request ([ADR 0011](adr/0011-xray-issue-kinds.md)). `issue attachments download`
-checks for Unix before it loads the configuration and exits 4 on other platforms.
-`issue attachments list` runs on every platform.
+with one Jira request. A `Test`, `Test Execution` or `Sub Test Execution` issue
+goes on to Xray with the matching filter. Any other or missing type exits 3 before
+jcli sends an Xray request ([ADR 0011](adr/0011-xray-issue-kinds.md)).
+`issue attachments download` checks for Unix before it loads the configuration and
+exits 4 on other platforms. `issue attachments list` runs on every platform.
 
 ## Modules and dependencies
 
@@ -268,8 +268,8 @@ It sends two requests per `xray test-runs` call, and neither changes Xray data:
    bearer token as a bare JSON string, read up to 64 KiB. The token lives only
    for this call.
 2. `POST api/v2/graphql` with the bearer token and the `getTestRuns` query for the
-   numeric issue ID. A Test sends the ID as `testIssueIds`, a Test Execution as
-   `testExecIssueIds`; each kind has its own query text. `limit` is 100 and
+   numeric issue ID. A Test sends the ID as `testIssueIds`, a Test Execution or Sub
+   Test Execution as `testExecIssueIds`; each kind has its own query text. `limit` is 100 and
    `start` is 0. `--status` values travel as a GraphQL variable, never as query
    text. The response is read up to 16 MiB.
 
