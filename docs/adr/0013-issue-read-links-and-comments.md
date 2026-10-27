@@ -87,9 +87,10 @@ been checked against a real Jira instance yet.
   ```
 
   An issue without comments shows `None`. When Jira's `total` is higher than
-  the number of comments shown, a last line says
-  `Showing the first <shown> of <total> comments.` Without a `total` no such
-  line is printed.
+  the number of comments shown, a line directly under the heading says
+  `Showing the first <shown> of <total> comments.` A comment body can't put
+  text there, so it can't fake the line. Without a `total` no such line is
+  printed.
 - The author and the timestamp go through the same single-line sanitizing,
   Markdown escaping and timestamp rule as the issue's `Created` value. A
   missing or blank author or timestamp shows as `Unknown`, and a missing or
