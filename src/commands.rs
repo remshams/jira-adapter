@@ -15,13 +15,14 @@ use crate::xray::test_runs::{
     TestRunSortDirection, TestRunSortField, TestRunsOutput, XrayIssueKind, sort_page,
 };
 
-pub(crate) fn read_issue(value: &str) -> ! {
+pub(crate) fn read_issue(value: &str, with_comments: bool) -> ! {
     let issue_key = parse_issue_key(value);
     let config = load_config();
     let client = or_exit(JiraClient::new(&config), 3);
     let issue = or_exit(client.issue(&issue_key), 3);
     let remote_links = or_exit(client.remote_links(&issue_key), 3);
-    write_stdout(&adf::render_issue(&issue, &remote_links));
+    let comments = with_comments.then(|| or_exit(client.comments(&issue_key), 3));
+    write_stdout(&adf::render_issue(&issue, &remote_links, comments.as_ref()));
 }
 
 pub(crate) fn search_issues(jql: &str, limit: u32) -> ! {

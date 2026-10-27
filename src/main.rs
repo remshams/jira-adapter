@@ -48,6 +48,9 @@ enum IssueCommand {
     Read {
         /// Canonical issue key (e.g. ABC-123)
         issue: String,
+        /// Append the issue's comments, oldest first, up to 1000
+        #[arg(long)]
+        comments: bool,
     },
     /// List or download an issue's attachments
     Attachments {
@@ -165,7 +168,7 @@ fn main() {
 
 fn run_issue(command: IssueCommand) -> ! {
     match command {
-        IssueCommand::Read { issue } => commands::read_issue(&issue),
+        IssueCommand::Read { issue, comments } => commands::read_issue(&issue, comments),
         IssueCommand::Attachments { command } => run_attachments(command),
         IssueCommand::Search {
             jql,
