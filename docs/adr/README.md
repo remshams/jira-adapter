@@ -43,3 +43,4 @@ was first built; their Date is the date they were recorded.
 | [0008](0008-hand-rolled-adf-to-markdown-renderer.md) | Hand-rolled ADF-to-Markdown renderer | Accepted |
 | [0009](0009-attachment-downloads.md) | Stream attachments into verified, atomically replaced files | Partially superseded by [ADR 0010](0010-list-and-select-attachments.md) |
 | [0010](0010-list-and-select-attachments.md) | List attachments and select which ones to download | Accepted |
+| [0011](0011-xray-issue-kinds.md) | Xray issue kinds for test runs | Proposed |
