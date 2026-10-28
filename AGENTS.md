@@ -64,7 +64,7 @@ It runs `cargo fmt --check`.
 
 ## Validation
 
-- After completing a task or feature, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo machete`, the changed-code mutation check `git diff <base>... > mutants.diff && cargo mutants --in-diff mutants.diff` (`<base>` is the branch the PR targets, usually `origin/main`), `cargo llvm-cov --lcov --output-path lcov.info`, and `cargo crap --lcov lcov.info` before handoff. A full `cargo mutants` run is optional locally; CI runs it on `main`.
+- After completing a task or feature, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo machete`, the changed-code mutation check `git diff --src-prefix=a/ --dst-prefix=b/ <base>... > mutants.diff && cargo mutants --in-diff mutants.diff` (`<base>` is the branch the PR targets, usually `origin/main`; the prefix flags keep the `a/` and `b/` paths that `cargo mutants` expects when git's `diff.mnemonicPrefix` or `diff.noprefix` is set, which otherwise makes it test no mutants), `cargo llvm-cov --lcov --output-path lcov.info`, and `cargo crap --lcov lcov.info` before handoff. A full `cargo mutants` run is optional locally; CI runs it on `main`.
 - Use cargo-mutants 27.1.0. Install it with `cargo install --locked cargo-mutants --version 27.1.0` if it is unavailable.
 - Use cargo-machete 0.9.2. Install it with `cargo install --locked cargo-machete --version 0.9.2` if it is unavailable.
 - Use cargo-llvm-cov 0.9.0 and cargo-crap 0.4.3. Install them with `rustup component add llvm-tools-preview`, `cargo +stable install --locked --version 0.9.0 cargo-llvm-cov`, and `cargo +stable install --locked --version 0.4.3 cargo-crap` if they are unavailable.
